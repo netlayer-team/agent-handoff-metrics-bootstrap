@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Handoff Metrics Bootstrap"
+  short_description: "Project memory, handoff workflow, and ROI metrics for AI coding agents."
+  default_prompt: "Use $agent-handoff-metrics-bootstrap to deploy AI handoff and usage metrics into the current repository."

@@ -1,0 +1,209 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">HandoffKit overview: AI coding-agent handoff and value metrics</title>
+  <desc id="desc">Anime-style marketing diagram showing handoff problems flowing through HandoffKit into resumable work, auditable delivery, and measurable AI value.</desc>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg1: #fff7ed;
+      --bg2: #eef2ff;
+      --paper: #ffffff;
+      --ink: #111827;
+      --muted: #475569;
+      --line: #1f2937;
+      --blue: #2563eb;
+      --blue-soft: #dbeafe;
+      --cyan: #0891b2;
+      --cyan-soft: #cffafe;
+      --green: #059669;
+      --green-soft: #d1fae5;
+      --amber: #f59e0b;
+      --amber-soft: #fef3c7;
+      --pink: #db2777;
+      --pink-soft: #fce7f3;
+      --purple: #7c3aed;
+      --purple-soft: #ede9fe;
+      --red: #ef4444;
+      --red-soft: #fee2e2;
+      --shadow: rgba(17, 24, 39, 0.18);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg1: #111827;
+        --bg2: #1e1b4b;
+        --paper: #0f172a;
+        --ink: #f8fafc;
+        --muted: #cbd5e1;
+        --line: #e5e7eb;
+        --blue: #60a5fa;
+        --blue-soft: #172554;
+        --cyan: #22d3ee;
+        --cyan-soft: #164e63;
+        --green: #34d399;
+        --green-soft: #064e3b;
+        --amber: #fbbf24;
+        --amber-soft: #78350f;
+        --pink: #f472b6;
+        --pink-soft: #831843;
+        --purple: #c4b5fd;
+        --purple-soft: #3b0764;
+        --red: #f87171;
+        --red-soft: #7f1d1d;
+        --shadow: rgba(0, 0, 0, 0.42);
+      }
+    }
+
+    svg { background: var(--bg1); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .title { fill: var(--ink); font-size: 38px; font-weight: 850; letter-spacing: 0; }
+    .subtitle { fill: var(--muted); font-size: 18px; font-weight: 650; }
+    .tiny-label { fill: var(--muted); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .panel { fill: var(--paper); stroke: var(--line); stroke-width: 2.2; filter: drop-shadow(0 14px 18px var(--shadow)); }
+    .chip { fill: var(--paper); stroke: var(--line); stroke-width: 1.8; }
+    .problem { fill: var(--paper); stroke: var(--line); stroke-width: 1.8; }
+    .hub { fill: var(--paper); stroke: var(--line); stroke-width: 3; filter: drop-shadow(0 18px 22px var(--shadow)); }
+    .badge { fill: var(--paper); stroke: var(--line); stroke-width: 2; filter: drop-shadow(0 10px 14px var(--shadow)); }
+    .card-title { fill: var(--ink); font-size: 17px; font-weight: 850; }
+    .card-copy { fill: var(--muted); font-size: 13px; font-weight: 620; }
+    .hub-title { fill: var(--ink); font-size: 28px; font-weight: 900; }
+    .hub-copy { fill: var(--muted); font-size: 13px; font-weight: 680; }
+    .code { fill: var(--ink); font-size: 13px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-weight: 800; }
+    .note { fill: var(--muted); font-size: 12px; font-weight: 700; }
+    .connector { stroke: var(--line); stroke-width: 3; stroke-linecap: round; marker-end: url(#arrow-dark); }
+    .connector-blue { stroke: var(--blue); stroke-width: 3.4; stroke-linecap: round; marker-end: url(#arrow-blue); }
+    .icon-line { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .spark { fill: var(--amber); stroke: var(--line); stroke-width: 1.5; }
+    .dot { fill: rgba(37, 99, 235, .16); }
+  </style>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="var(--bg1)"/>
+      <stop offset="100%" stop-color="var(--bg2)"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="var(--cyan-soft)"/>
+      <stop offset="54%" stop-color="var(--blue-soft)"/>
+      <stop offset="100%" stop-color="var(--purple-soft)"/>
+    </linearGradient>
+    <marker id="arrow-dark" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="var(--line)"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="var(--blue)"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="720" fill="url(#bg)"/>
+
+  <g opacity=".75">
+    <circle class="dot" cx="88" cy="128" r="6"/><circle class="dot" cx="122" cy="96" r="4"/><circle class="dot" cx="1175" cy="116" r="6"/><circle class="dot" cx="1126" cy="82" r="4"/>
+    <circle class="dot" cx="106" cy="610" r="5"/><circle class="dot" cx="1158" cy="616" r="5"/><circle class="dot" cx="1014" cy="666" r="3"/>
+  </g>
+
+  <polygon class="spark" points="1150,46 1160,72 1188,78 1165,94 1169,122 1147,106 1121,118 1131,91 1111,74 1139,72"/>
+  <polygon class="spark" points="358,116 366,132 384,135 370,146 373,164 357,154 341,162 346,145 332,134 350,132"/>
+  <polygon class="spark" points="1124,484 1131,500 1148,503 1135,514 1138,531 1124,522 1108,530 1114,513 1101,502 1118,499"/>
+
+  <text class="title" x="56" y="64">AI handoff should not reset every session</text>
+  <text class="subtitle" x="56" y="96">HandoffKit turns project memory, agent handoff, Git evidence, and ROI metrics into repo-local assets.</text>
+
+  <text class="tiny-label" x="72" y="150">Where teams get stuck</text>
+  <text class="tiny-label" x="524" y="150">Repo-local HandoffKit layer</text>
+  <text class="tiny-label" x="940" y="150">What the team gets</text>
+
+  <g transform="translate(56 176)">
+    <rect class="problem" x="0" y="0" width="342" height="76" rx="18"/>
+    <circle cx="42" cy="38" r="24" fill="var(--red-soft)" stroke="var(--red)" stroke-width="2"/>
+    <path class="icon-line" d="M31 41h22M33 29h18a4 4 0 0 1 4 4v14H29V33a4 4 0 0 1 4-4z" stroke="var(--red)"/>
+    <text class="card-title" x="82" y="31">New laptop, no context</text>
+    <text class="card-copy" x="82" y="54">Work moved; chat history stayed behind.</text>
+
+    <rect class="problem" x="0" y="98" width="342" height="76" rx="18"/>
+    <circle cx="42" cy="136" r="24" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="2"/>
+    <path class="icon-line" d="M32 126h20M32 136h24M32 146h13" stroke="var(--amber)"/>
+    <text class="card-title" x="82" y="129">Changed coding agent</text>
+    <text class="card-copy" x="82" y="152">Codex, Claude, Cursor, or Gemini start cold.</text>
+
+    <rect class="problem" x="0" y="196" width="342" height="76" rx="18"/>
+    <circle cx="42" cy="234" r="24" fill="var(--purple-soft)" stroke="var(--purple)" stroke-width="2"/>
+    <circle cx="35" cy="226" r="7" fill="none" stroke="var(--purple)" stroke-width="2"/>
+    <circle cx="56" cy="224" r="6" fill="none" stroke="var(--purple)" stroke-width="2"/>
+    <path class="icon-line" d="M27 247c8-14 22-14 31 0M48 245c4-7 12-8 18-2" stroke="var(--purple)"/>
+    <text class="card-title" x="82" y="227">Team handoff is fragile</text>
+    <text class="card-copy" x="82" y="250">Decisions and validation live in chats.</text>
+
+    <rect class="problem" x="0" y="294" width="342" height="76" rx="18"/>
+    <circle cx="42" cy="332" r="24" fill="var(--pink-soft)" stroke="var(--pink)" stroke-width="2"/>
+    <path class="icon-line" d="M31 342h24M35 333l7-13 8 13 7-20" stroke="var(--pink)"/>
+    <text class="card-title" x="82" y="325">AI value is invisible</text>
+    <text class="card-copy" x="82" y="348">Tokens exist; delivery evidence does not.</text>
+  </g>
+
+  <line class="connector" x1="398" y1="214" x2="500" y2="214"/>
+  <line class="connector" x1="398" y1="312" x2="500" y2="312"/>
+  <line class="connector" x1="398" y1="410" x2="500" y2="410"/>
+  <line class="connector" x1="398" y1="508" x2="500" y2="508"/>
+
+  <g transform="translate(496 166)">
+    <rect class="hub" x="0" y="0" width="338" height="430" rx="28" fill="url(#hero)"/>
+    <text class="hub-title" x="30" y="48">HandoffKit</text>
+    <text class="hub-copy" x="30" y="73">Project memory + delivery metrics.</text>
+
+    <g transform="translate(102 92)">
+      <circle cx="68" cy="66" r="58" fill="#ffffff" stroke="var(--line)" stroke-width="3"/>
+      <rect x="28" y="24" width="80" height="72" rx="18" fill="var(--blue-soft)" stroke="var(--blue)" stroke-width="3"/>
+      <circle cx="53" cy="58" r="7" fill="var(--blue)"/>
+      <circle cx="84" cy="58" r="7" fill="var(--blue)"/>
+      <path d="M53 78 L84 78" stroke="var(--line)" stroke-width="4" stroke-linecap="round"/>
+      <rect x="56" y="7" width="25" height="20" rx="7" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="3"/>
+      <line x1="68" y1="7" x2="68" y2="-12" stroke="var(--line)" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="68" cy="-16" r="5" fill="var(--amber)" stroke="var(--line)" stroke-width="2"/>
+      <path d="M16 66 L0 54 L0 82 Z" fill="var(--green-soft)" stroke="var(--green)" stroke-width="3"/>
+      <path d="M120 66 L136 54 L136 82 Z" fill="var(--green-soft)" stroke="var(--green)" stroke-width="3"/>
+    </g>
+
+    <rect class="chip" x="30" y="236" width="278" height="42" rx="13" fill="var(--blue-soft)"/>
+    <text class="code" x="50" y="263">.agent/context.md</text>
+
+    <rect class="chip" x="30" y="288" width="278" height="42" rx="13" fill="var(--green-soft)"/>
+    <text class="code" x="50" y="315">.agent/handoff.md</text>
+
+    <rect class="chip" x="30" y="340" width="278" height="42" rx="13" fill="var(--purple-soft)"/>
+    <text class="code" x="50" y="367">AGENTS.md / CLAUDE.md</text>
+
+    <rect class="chip" x="30" y="392" width="278" height="42" rx="13" fill="var(--amber-soft)"/>
+    <text class="code" x="50" y="419">Codex hooks + ROI report</text>
+  </g>
+
+  <line class="connector-blue" x1="834" y1="220" x2="922" y2="220"/>
+  <line class="connector-blue" x1="834" y1="362" x2="922" y2="362"/>
+  <line class="connector-blue" x1="834" y1="506" x2="922" y2="506"/>
+
+  <g transform="translate(922 176)">
+    <rect class="badge" x="0" y="0" width="302" height="88" rx="20"/>
+    <circle cx="43" cy="44" r="25" fill="var(--green-soft)" stroke="var(--green)" stroke-width="2.2"/>
+    <path class="icon-line" d="M31 45l8 8 16-20" stroke="var(--green)"/>
+    <text class="card-title" x="82" y="35">Resumable work</text>
+    <text class="card-copy" x="82" y="56">Any agent starts from</text>
+    <text class="card-copy" x="82" y="74">repo-local memory.</text>
+
+    <rect class="badge" x="0" y="142" width="302" height="88" rx="20"/>
+    <circle cx="43" cy="186" r="25" fill="var(--blue-soft)" stroke="var(--blue)" stroke-width="2.2"/>
+    <path class="icon-line" d="M32 176h22M32 186h22M32 196h14" stroke="var(--blue)"/>
+    <text class="card-title" x="82" y="177">Auditable delivery</text>
+    <text class="card-copy" x="82" y="198">Handoff notes, validation,</text>
+    <text class="card-copy" x="82" y="216">identity, and Git evidence.</text>
+
+    <rect class="badge" x="0" y="286" width="302" height="88" rx="20"/>
+    <circle cx="43" cy="330" r="25" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="2.2"/>
+    <path class="icon-line" d="M31 340h24M35 331l7-13 8 13 7-20" stroke="var(--amber)"/>
+    <text class="card-title" x="82" y="321">Measurable AI value</text>
+    <text class="card-copy" x="82" y="342">Usage, cost model,</text>
+    <text class="card-copy" x="82" y="360">and ROI reports.</text>
+  </g>
+
+  <g transform="translate(144 638)">
+    <rect class="panel" x="0" y="0" width="992" height="42" rx="21"/>
+    <text class="note" x="28" y="27">Do not sync chat history. Sync project memory, handoff state, decisions, validation results, and delivery evidence.</text>
+  </g>
+</svg>
