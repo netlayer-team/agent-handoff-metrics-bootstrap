@@ -12,17 +12,18 @@ Chinese documentation: [README_zh.md](README_zh.md)
 
 If you have switched laptops, changed coding-agent tools, or handed work to another engineer and watched the next AI session start cold, this repository targets that gap. It also addresses the harder management question: AI helped, but where is the delivery evidence and value report?
 
-It deploys project-local memory, handoff prompts, thin agent adapters, Git identity checks, Codex hooks, and usage/value reporting into an existing repository.
+It deploys project-local memory, handoff prompts, thin agent adapters, Git identity checks, Codex hooks, a background task-value maintainer, and usage/value reporting into an existing repository.
 
 After deployment, Codex, Claude Code, Cursor, Gemini CLI, or other coding agents can:
 
 - resume work across machines, tools, and sessions;
 - read durable project memory before changing code;
 - write clear handoff notes after each task;
-- record AI-assisted turns as safe project-level usage metrics;
+- record AI-assisted turns as local hook-layer audit metadata;
+- maintain task-level business value summaries after Stop in the background;
 - connect AI work to Git outcomes, cost, and ROI reports.
 
-Automated turn capture is currently implemented through Codex hooks. The project memory and handoff workflow are tool-agnostic and can be used by other coding agents.
+Automated turn capture is currently implemented through Codex hooks. After Stop, the hook queues a background Codex maintainer that updates `.agent/usage/project-summary.json` at task granularity. The project memory and handoff workflow are tool-agnostic and can be used by other coding agents.
 
 The core idea is simple:
 
@@ -67,8 +68,12 @@ Validate the generated setup:
 
 ```bash
 git status --short
+bash -n .agent/scripts/agent-start.sh
+bash -n .agent/scripts/agent-finish.sh
+bash -n .agent/scripts/project-summary-maintainer.sh
 python3 -m py_compile .agent/scripts/agent-usage-hook.py
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
+python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
 python3 .agent/scripts/agent-usage-hook.py --print-value-report >/tmp/agent-value-report.json
 git diff --check
 ```
@@ -78,13 +83,15 @@ git diff --check
 Running the deployer in a target repository can create:
 
 - `.agent/context.md`, `.agent/handoff.md`, `.agent/workflow.md`
-- `.agent/prompts/start.md`, `.agent/prompts/finish.md`
-- `.agent/scripts/agent-start.sh`, `agent-finish.sh`, `agent-identity.sh`, `agent-usage-hook.py`
-- `.agent/usage/README.md` and regenerated `project-summary.json`
+- `.agent/prompts/start.md`, `.agent/prompts/finish.md`, `maintain-project-summary.md`
+- `.agent/scripts/agent-start.sh`, `agent-finish.sh`, `agent-identity.sh`, `agent-usage-hook.py`, `project-summary-maintainer.sh`
+- `.agent/usage/README.md`, local hook audit summary, and initialized `project-summary.json`
 - `.codex/hooks.json`, `.codex/config.toml`, `.codex/prompts/*`, `.codex/scripts/*`
+- `.codex/context.md` and `.codex/handoff.md` compatibility pointers to `.agent/*`
 - Thin `AGENTS.md` and `CLAUDE.md` adapters
 - `.githooks/pre-commit`, and optionally `.githooks/commit-msg`
 - `.gitignore` entries for local agent and Codex runtime files
+- A README handoff entry when `README.md` already exists
 
 The deploy script does not commit changes.
 
@@ -110,18 +117,23 @@ The generated pre-commit hook checks the configured agent identity before commit
 
 The copied `agent-usage-hook.py` records Codex turn usage into `.agent/usage/`.
 
+The data model has two layers:
+
+- Hook layer: `codex-turns.jsonl` and `summary.json` record per-turn token usage, elapsed time, model, Git state, and local audit metadata.
+- Project-summary layer: Stop queues `project-summary-maintainer.sh`, which runs Codex in the background and maintains `project-summary.json` as a task-level business value summary. Multiple turns may become one task, and consultation or no-deliverable turns may stay only in hook audit data.
+
 Commit-safe output:
 
-- `.agent/usage/project-summary.json`: stable summary metadata only, including model, token usage, elapsed time, AI task summary, AI complexity, and Git closure state.
+- `.agent/usage/project-summary.json`: stable task-level metadata only, including task summary, included turn indexes, aggregate token usage, elapsed time, AI task complexity, and Git closure hints.
 
 Ignored runtime output:
 
 - `codex-turns.jsonl`: detailed local turn records.
-- `summary.json`: local full summary with machine-specific details.
+- `summary.json`: local hook-layer audit summary with machine-specific details.
 - `value-report.json`: derived cost, traditional cost, savings, and ROI report.
-- pending files, lock files, and hook error logs.
+- maintainer logs, pending files, lock files, and hook error logs.
 
-Before finalizing an AI-authored task, write task metadata:
+Before finalizing an AI-authored task, you can write hook-layer task metadata as a hint for later summarization:
 
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --set-current-turn-metadata \
@@ -135,6 +147,8 @@ Cost and ROI reports are derived from current policy assumptions and should be r
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --write-value-report
 ```
+
+The value report is derived from `project-summary.json`, not directly from raw hook turns.
 
 ## Repository Layout
 
@@ -160,8 +174,15 @@ For a deployment smoke test:
 tmp_repo="$(mktemp -d)"
 git -C "$tmp_repo" init
 python3 scripts/deploy_agent_system.py --repo "$tmp_repo" --project-name Smoke --agent none
+bash -n "$tmp_repo/.agent/scripts/agent-start.sh"
+bash -n "$tmp_repo/.agent/scripts/agent-finish.sh"
+bash -n "$tmp_repo/.agent/scripts/project-summary-maintainer.sh"
 python3 -m py_compile "$tmp_repo/.agent/scripts/agent-usage-hook.py"
-python3 "$tmp_repo/.agent/scripts/agent-usage-hook.py" --rebuild-summary
+(
+  cd "$tmp_repo"
+  python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
+  python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
+)
 ```
 
 ## Privacy Boundary

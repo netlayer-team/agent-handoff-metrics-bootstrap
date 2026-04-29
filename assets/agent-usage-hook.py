@@ -3,7 +3,8 @@
 
 This script is designed to be called by Codex hooks. It records the prompt at
 UserPromptSubmit and completes the turn record at Stop by reading Codex's
-transcript token_count events.
+transcript token_count events. Stop also queues a background Codex maintainer
+that updates the task-level project-summary.json separately from hook metadata.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ USAGE_KEYS = (
     "reasoning_output_tokens",
     "total_tokens",
 )
+
+PROJECT_SUMMARY_SCHEMA_VERSION = 3
+HOOK_DISABLED_ENV = "AGENT_USAGE_HOOK_DISABLED"
+MAINTAINER_DISABLED_ENV = "AGENT_PROJECT_SUMMARY_MAINTAINER_DISABLED"
 
 DEFAULT_USD_TO_CNY = 7.20
 DEFAULT_ENGINEER_HOURLY_RATE_CNY = 300.0
@@ -100,7 +105,7 @@ def resolve_repo_root(cwd_value: str | None) -> Path:
 
 
 def usage_dir(root: Path) -> Path:
-    override = os.environ.get("CLRSP_AGENT_USAGE_DIR")
+    override = os.environ.get("AGENT_USAGE_DIR") or os.environ.get("CLRSP_AGENT_USAGE_DIR")
     if override:
         path = Path(override)
         return path if path.is_absolute() else root / path
@@ -596,6 +601,54 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def initial_project_summary(root: Path) -> dict[str, Any]:
+    return {
+        "schema_version": PROJECT_SUMMARY_SCHEMA_VERSION,
+        "project": root.name,
+        "updated_at": utc_now(),
+        "maintained_by": "codex_project_summary_maintainer",
+        "source_layers": {
+            "hook_audit_records": ".agent/usage/codex-turns.jsonl",
+            "local_audit_summary": ".agent/usage/summary.json",
+            "task_value_summary": ".agent/usage/project-summary.json",
+        },
+        "totals": {
+            "audit_recorded_turns": 0,
+            "value_task_count": 0,
+            "included_turn_count": 0,
+            "excluded_turn_count": 0,
+        },
+        "tasks": [],
+        "privacy": {
+            "contains_user_prompts": False,
+            "contains_assistant_outputs": False,
+            "contains_session_ids": False,
+            "contains_transcript_paths": False,
+            "contains_local_paths": False,
+            "contains_derived_costs": False,
+            "contains_roi": False,
+            "task_descriptions_are_ai_maintained": True,
+        },
+        "notes": [
+            "hook layer owns per-turn local audit metadata",
+            "project-summary layer is maintained by a background Codex maintainer at task granularity",
+            "multiple turns may be merged into one task",
+            "consultation, pure Git bookkeeping, and no-deliverable turns may remain only in hook audit records",
+            "cost and ROI are derived separately from this task-level summary and current policy",
+        ],
+    }
+
+
+def ensure_project_summary(root: Path, out_dir: Path) -> dict[str, Any]:
+    path = out_dir / "project-summary.json"
+    existing = load_json(path)
+    if isinstance(existing, dict):
+        return existing
+    summary = initial_project_summary(root)
+    write_json(path, summary)
+    return summary
+
+
 def read_records(records_path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not records_path.exists():
@@ -731,14 +784,56 @@ def finalize_cost_by_model(cost_by_model: dict[str, dict[str, Any]]) -> dict[str
     return finalized
 
 
+def project_summary_value_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    tasks = summary.get("tasks")
+    if isinstance(tasks, list):
+        items: list[dict[str, Any]] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if task.get("value_included") is False:
+                continue
+            status = str(task.get("status") or "").strip().lower()
+            if status in {"excluded", "no_delivery", "no-delivery", "bookkeeping_only", "consultation_only"}:
+                continue
+            business_value = task.get("business_value") if isinstance(task.get("business_value"), dict) else {}
+            token_usage = normalize_usage(task.get("token_usage") if isinstance(task.get("token_usage"), dict) else {})
+            models = task.get("models") if isinstance(task.get("models"), list) else []
+            primary_model = str(task.get("primary_model") or (models[0] if models else "") or "unknown")
+            items.append(
+                {
+                    "task_id": task.get("task_id"),
+                    "title": task.get("title") or business_value.get("description") or task.get("summary"),
+                    "summary": task.get("summary"),
+                    "model": primary_model,
+                    "task": {
+                        "description": business_value.get("description") or task.get("summary") or task.get("title") or "未提供 AI 任务摘要",
+                        "complexity": normalize_complexity(business_value.get("complexity")),
+                        "complexity_reason": business_value.get("complexity_reason"),
+                        "complexity_source": business_value.get("complexity_source") or "project_summary_maintainer",
+                    },
+                    "timing": {
+                        "elapsed_seconds": task.get("elapsed_seconds"),
+                    },
+                    "token_usage": token_usage or {key: 0 for key in USAGE_KEYS},
+                    "git": task.get("git") if isinstance(task.get("git"), dict) else {},
+                    "included_turn_indexes": task.get("included_turn_indexes") if isinstance(task.get("included_turn_indexes"), list) else [],
+                }
+            )
+        return items
+
+    task_history = summary.get("task_history") if isinstance(summary.get("task_history"), list) else []
+    return [item for item in task_history if isinstance(item, dict)]
+
+
 def build_value_report(root: Path, out_dir: Path, project_summary: dict[str, Any] | None = None) -> dict[str, Any]:
-    summary = project_summary or load_json(out_dir / "project-summary.json") or rebuild_summary(root, out_dir)
+    summary = project_summary or load_json(out_dir / "project-summary.json") or ensure_project_summary(root, out_dir)
+    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
     cost_totals = empty_cost_totals()
     cost_by_model: dict[str, dict[str, Any]] = {}
     task_value_history: list[dict[str, Any]] = []
 
-    task_history = summary.get("task_history") if isinstance(summary.get("task_history"), list) else []
-    for item in task_history:
+    for item in project_summary_value_items(summary):
         if not isinstance(item, dict):
             continue
         task = item.get("task") if isinstance(item.get("task"), dict) else {}
@@ -751,36 +846,38 @@ def build_value_report(root: Path, out_dir: Path, project_summary: dict[str, Any
             task.get("complexity_reason"),
         )
         add_cost_totals(cost_totals, cost_by_model, model, economics)
-        task_value_history.append(
-            {
-                "turn_index": item.get("turn_index"),
-                "recorded_at": item.get("recorded_at"),
-                "model": model,
-                "task": task,
-                "timing": item.get("timing"),
-                "token_usage": usage or {key: 0 for key in USAGE_KEYS},
-                "git": item.get("git"),
-                "cost_estimate": {
-                    "currency": "CNY",
-                    "pricing_available": economics.get("pricing_available"),
-                    "model_price_key": economics.get("model_price_key"),
-                    "ai_cost_cny": economics.get("ai_cost_cny"),
-                    "traditional_hours": economics.get("traditional_hours"),
-                    "traditional_cost_cny": economics.get("traditional_cost_cny"),
-                    "replacement_savings_cny": economics.get("replacement_savings_cny"),
-                    "roi_ratio": economics.get("roi_ratio"),
-                    "roi_percent": economics.get("roi_percent"),
-                },
-            }
-        )
+        history_item = {
+            "model": model,
+            "task": task,
+            "timing": item.get("timing"),
+            "token_usage": usage or {key: 0 for key in USAGE_KEYS},
+            "git": item.get("git"),
+            "cost_estimate": {
+                "currency": "CNY",
+                "pricing_available": economics.get("pricing_available"),
+                "model_price_key": economics.get("model_price_key"),
+                "ai_cost_cny": economics.get("ai_cost_cny"),
+                "traditional_hours": economics.get("traditional_hours"),
+                "traditional_cost_cny": economics.get("traditional_cost_cny"),
+                "replacement_savings_cny": economics.get("replacement_savings_cny"),
+                "roi_ratio": economics.get("roi_ratio"),
+                "roi_percent": economics.get("roi_percent"),
+            },
+        }
+        for key in ("task_id", "title", "summary", "turn_index", "recorded_at", "included_turn_indexes"):
+            if key in item:
+                history_item[key] = item.get(key)
+        task_value_history.append(history_item)
 
     return {
         "schema_version": 1,
         "project": summary.get("project") or root.name,
         "generated_at": utc_now(),
+        "source_summary_schema_version": summary.get("schema_version"),
         "source_summary_file": ".agent/usage/project-summary.json",
         "source_summary_updated_at": summary.get("updated_at"),
-        "recorded_turns": summary.get("recorded_turns", 0),
+        "recorded_turns": summary.get("recorded_turns") or totals.get("audit_recorded_turns", 0),
+        "value_task_count": len(task_value_history),
         "cost_policy": cost_policy(),
         "cost_totals": finalize_cost_totals(cost_totals),
         "cost_by_model": finalize_cost_by_model(cost_by_model),
@@ -886,63 +983,64 @@ def rebuild_summary(root: Path, out_dir: Path) -> dict[str, Any]:
         "notes": [
             "turn token totals use Codex transcript cumulative deltas when available",
             "user prompt and assistant output token estimates are local text estimates",
-            "project summary stores stable usage metadata only; derived value reports are regenerated separately",
-            "usage records are project-local runtime data and should not be committed",
+            "summary.json is local hook-layer audit data and should not be committed",
+            "project-summary.json is maintained separately by the background Codex maintainer",
+            "derived value reports are regenerated from project-summary.json and current policy",
         ],
     }
     write_json(out_dir / "summary.json", summary)
-    write_public_summary(root, out_dir, summary)
+    ensure_project_summary(root, out_dir)
     return summary
 
 
-def write_public_summary(root: Path, out_dir: Path, summary: dict[str, Any]) -> None:
-    public_summary = {
-        "schema_version": 2,
-        "project": root.name,
-        "updated_at": summary.get("updated_at"),
-        "recorded_turns": summary.get("recorded_turns", 0),
-        "assisted_tasks_estimate": summary.get("assisted_tasks_estimate", 0),
-        "git_closed_loops": summary.get("git_closed_loops", 0),
-        "token_totals": summary.get("token_totals", {}),
-        "user_prompt_token_estimate_total": summary.get("user_prompt_token_estimate_total", 0),
-        "assistant_output_token_estimate_total": summary.get("assistant_output_token_estimate_total", 0),
-        "elapsed_seconds_total": summary.get("elapsed_seconds_total", 0),
-        "complexity_counts": summary.get("complexity_counts", {}),
-        "turns_by_model": summary.get("turns_by_model", {}),
-        "task_history": summary.get("task_history", []),
-        "last_recorded_at": summary.get("last_recorded_at"),
-        "privacy": {
-            "contains_user_prompts": False,
-            "contains_assistant_outputs": False,
-            "contains_task_descriptions": True,
-            "task_descriptions_are_ai_summarized": True,
-            "task_descriptions_may_be_result_or_commit_derived": True,
-            "contains_session_ids": False,
-            "contains_transcript_paths": False,
-            "contains_derived_costs": False,
-            "contains_roi": False,
-            "source_detail_file": ".agent/usage/codex-turns.jsonl",
-            "source_detail_file_committed": False,
-        },
-        "notes": [
-            "sanitized project usage metadata intended for Git tracking",
-            "task_history keeps AI task summaries and stable metrics, not full prompts or assistant output",
-            "cost and ROI are regenerated into a separate value report from this summary and current policy",
-            "raw per-turn records stay local because they contain prompts, assistant output, and local paths",
-        ],
-    }
-    write_json(out_dir / "project-summary.json", public_summary)
-
-
-def append_turn_record(root: Path, out_dir: Path, record: dict[str, Any]) -> None:
+def append_turn_record(root: Path, out_dir: Path, record: dict[str, Any]) -> bool:
     records_path = out_dir / "codex-turns.jsonl"
     lock_path = out_dir / ".lock"
+    appended = False
     with UsageLock(lock_path):
         existing_ids = {item.get("record_id") for item in read_records(records_path)}
         if record.get("record_id") not in existing_ids:
             with records_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            appended = True
         rebuild_summary(root, out_dir)
+    return appended
+
+
+def start_project_summary_maintainer(root: Path, out_dir: Path) -> None:
+    disabled = str(os.environ.get(MAINTAINER_DISABLED_ENV) or "").strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return
+
+    script = root / ".agent" / "scripts" / "project-summary-maintainer.sh"
+    if not script.exists():
+        log_error(out_dir, f"project summary maintainer script missing: {script}")
+        return
+
+    env = os.environ.copy()
+    env[HOOK_DISABLED_ENV] = "1"
+    env["AGENT_PROJECT_SUMMARY_MAINTAINER"] = "1"
+    env.setdefault("AGENT_USAGE_DIR", str(out_dir))
+
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = out_dir / "project-summary-maintainer.log"
+        log_handle = log_path.open("ab")
+        try:
+            subprocess.Popen(
+                [str(script)],
+                cwd=str(root),
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            log_handle.close()
+    except OSError as exc:
+        log_error(out_dir, f"project summary maintainer launch failed: {type(exc).__name__}: {exc}")
 
 
 def record_prompt(event: dict[str, Any], root: Path, out_dir: Path) -> None:
@@ -1063,11 +1161,13 @@ def record_stop(event: dict[str, Any], root: Path, out_dir: Path) -> None:
             "pending_path": str(pending_path),
         },
     }
-    append_turn_record(root, out_dir, record)
+    appended = append_turn_record(root, out_dir, record)
     try:
         pending_path.unlink()
     except OSError:
         pass
+    if appended:
+        start_project_summary_maintainer(root, out_dir)
 
 
 def log_error(out_dir: Path, message: str) -> None:
@@ -1088,6 +1188,12 @@ def main() -> int:
         root = resolve_repo_root(os.getcwd())
         rebuild_summary(root, usage_dir(root))
         return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--ensure-project-summary":
+        root = resolve_repo_root(os.getcwd())
+        out_dir = usage_dir(root)
+        ensure_project_summary(root, out_dir)
+        print(str(out_dir / "project-summary.json"))
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--write-value-report":
         root = resolve_repo_root(os.getcwd())
         out_dir = usage_dir(root)
@@ -1107,6 +1213,10 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--set-current-turn-metadata":
         root = resolve_repo_root(os.getcwd())
         return set_current_turn_metadata(root, usage_dir(root), sys.argv[2:])
+
+    if str(os.environ.get(HOOK_DISABLED_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}:
+        hook_success()
+        return 0
 
     raw = sys.stdin.read()
     try:

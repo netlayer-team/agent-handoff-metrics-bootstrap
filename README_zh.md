@@ -12,17 +12,18 @@ AI Agent 接管与度量引导器。
 
 如果你遇到过换电脑、换编程代理工具、多人协作接手后，新的 AI 会话重新从零开始的问题，或者 AI 确实帮了忙但很难沉淀交付证据和价值报告，这个仓库就是为了解决这类问题。
 
-它会把项目本地记忆、交接提示、轻量 agent 适配器、Git 身份检查、Codex hooks、使用量/价值报告部署进现有仓库。
+它会把项目本地记忆、交接提示、轻量 agent 适配器、Git 身份检查、Codex hooks、后台任务价值维护器、使用量/价值报告部署进现有仓库。
 
 部署后，Codex、Claude Code、Cursor、Gemini CLI 或其他 coding agents 能够：
 
 - 跨机器、跨工具、跨会话继续开发；
 - 在改代码前读取长期项目记忆；
 - 在每个任务结束后写清楚交接说明；
-- 把每轮 AI 辅助工作记录为安全的项目级使用量指标；
+- 把每轮 AI 辅助工作记录为本机 hook 层审计元数据；
+- 在 Stop 后后台维护任务级业务价值摘要；
 - 把 AI 工作关联到 Git 结果、成本和 ROI 报告。
 
-自动化 turn 采集目前通过 Codex hooks 实现。项目记忆和交接工作流本身是工具无关的，其他 coding agents 也可以复用。
+自动化 turn 采集目前通过 Codex hooks 实现。Stop 后 hook 会排队启动后台 Codex maintainer，把 `.agent/usage/project-summary.json` 维护成任务级摘要。项目记忆和交接工作流本身是工具无关的，其他 coding agents 也可以复用。
 
 核心理念很简单：
 
@@ -67,8 +68,12 @@ python3 /root/.codex/skills/agent-handoff-metrics-bootstrap/scripts/deploy_agent
 
 ```bash
 git status --short
+bash -n .agent/scripts/agent-start.sh
+bash -n .agent/scripts/agent-finish.sh
+bash -n .agent/scripts/project-summary-maintainer.sh
 python3 -m py_compile .agent/scripts/agent-usage-hook.py
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
+python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
 python3 .agent/scripts/agent-usage-hook.py --print-value-report >/tmp/agent-value-report.json
 git diff --check
 ```
@@ -78,13 +83,15 @@ git diff --check
 在目标仓库运行部署脚本后，可能生成：
 
 - `.agent/context.md`、`.agent/handoff.md`、`.agent/workflow.md`
-- `.agent/prompts/start.md`、`.agent/prompts/finish.md`
-- `.agent/scripts/agent-start.sh`、`agent-finish.sh`、`agent-identity.sh`、`agent-usage-hook.py`
-- `.agent/usage/README.md` 和重新生成的 `project-summary.json`
+- `.agent/prompts/start.md`、`.agent/prompts/finish.md`、`maintain-project-summary.md`
+- `.agent/scripts/agent-start.sh`、`agent-finish.sh`、`agent-identity.sh`、`agent-usage-hook.py`、`project-summary-maintainer.sh`
+- `.agent/usage/README.md`、本机 hook 审计汇总和初始化的 `project-summary.json`
 - `.codex/hooks.json`、`.codex/config.toml`、`.codex/prompts/*`、`.codex/scripts/*`
+- `.codex/context.md` 和 `.codex/handoff.md` 兼容指针，指向 `.agent/*`
 - 轻量 `AGENTS.md` 和 `CLAUDE.md` 入口适配器
 - `.githooks/pre-commit`，以及可选的 `.githooks/commit-msg`
 - `.gitignore` 中的 agent/Codex 本地运行文件忽略规则
+- 已存在 `README.md` 时自动追加“AI Agent 工程交接”入口
 
 部署脚本不会自动提交 Git。
 
@@ -110,18 +117,23 @@ git diff --check
 
 复制到目标仓库的 `agent-usage-hook.py` 会把 Codex turn 使用量记录到 `.agent/usage/`。
 
+数据分两层：
+
+- hook 层：`codex-turns.jsonl` 和 `summary.json` 逐轮记录 token、耗时、模型、Git 状态和本机审计元数据。
+- project-summary 层：Stop 后排队启动 `project-summary-maintainer.sh`，后台运行 Codex，把 `project-summary.json` 维护为任务级业务价值摘要。多轮对话可以合并成一个任务，咨询或无交付轮次可以只留在 hook 审计数据中。
+
 可提交输出：
 
-- `.agent/usage/project-summary.json`：稳定摘要元数据，包含模型、token 用量、耗时、AI 任务摘要、AI 复杂度和 Git 闭环状态。
+- `.agent/usage/project-summary.json`：稳定任务级元数据，包含任务摘要、纳入的 turn 序号、聚合 token 用量、耗时、AI 任务复杂度和 Git 闭环提示。
 
 默认忽略的本地运行输出：
 
 - `codex-turns.jsonl`：逐轮本地原始记录。
-- `summary.json`：包含本机细节的本地完整汇总。
+- `summary.json`：包含本机细节的 hook 层审计汇总。
 - `value-report.json`：派生的成本、传统成本、节约额和 ROI 报告。
-- pending 文件、lock 文件和 hook 错误日志。
+- maintainer 日志、pending 文件、lock 文件和 hook 错误日志。
 
-在收尾 AI 生成任务前，写入本轮任务元数据：
+在收尾 AI 生成任务前，可以写入 hook 层任务元数据，作为后续任务级摘要的提示：
 
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --set-current-turn-metadata \
@@ -135,6 +147,8 @@ python3 .agent/scripts/agent-usage-hook.py --set-current-turn-metadata \
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --write-value-report
 ```
+
+价值报告从 `project-summary.json` 派生，不直接从逐轮 hook 原始记录派生。
 
 ## 仓库结构
 
@@ -160,8 +174,15 @@ python3 scripts/deploy_agent_system.py --help
 tmp_repo="$(mktemp -d)"
 git -C "$tmp_repo" init
 python3 scripts/deploy_agent_system.py --repo "$tmp_repo" --project-name Smoke --agent none
+bash -n "$tmp_repo/.agent/scripts/agent-start.sh"
+bash -n "$tmp_repo/.agent/scripts/agent-finish.sh"
+bash -n "$tmp_repo/.agent/scripts/project-summary-maintainer.sh"
 python3 -m py_compile "$tmp_repo/.agent/scripts/agent-usage-hook.py"
-python3 "$tmp_repo/.agent/scripts/agent-usage-hook.py" --rebuild-summary
+(
+  cd "$tmp_repo"
+  python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
+  python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
+)
 ```
 
 ## 隐私边界

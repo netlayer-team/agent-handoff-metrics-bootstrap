@@ -130,6 +130,34 @@ def append_gitignore(root: Path, report: list[str]) -> None:
     report.append(f"updated {path}")
 
 
+def append_readme_entry(root: Path, report: list[str]) -> None:
+    path = root / "README.md"
+    if not path.exists():
+        report.append(f"skipped missing {path}")
+        return
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    marker = "## AI Agent 工程交接"
+    if marker in text:
+        report.append(f"unchanged {path} handoff entry")
+        return
+
+    block = """
+
+## AI Agent 工程交接
+
+本项目使用 `.agent/` 作为 AI coding agent 工程级接管上下文的单事实源。新会话开始前请先阅读：
+
+1. `.agent/context.md`
+2. `.agent/handoff.md`
+3. `.agent/workflow.md`
+
+可运行 `./.agent/scripts/agent-start.sh` 获取启动提示，收尾时运行 `./.agent/scripts/agent-finish.sh` 获取交接清单。
+"""
+    path.write_text(text.rstrip() + block + "\n", encoding="utf-8")
+    report.append(f"updated {path} handoff entry")
+
+
 def update_codex_config(root: Path, report: list[str]) -> None:
     path = root / ".codex" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,31 +184,72 @@ def update_codex_config(root: Path, report: list[str]) -> None:
     report.append(f"updated {path}")
 
 
+def codex_pointer_md(target: str) -> str:
+    return f"""# Codex Compatibility Pointer
+
+本文件只作为 Codex 兼容入口。项目 AI 接管事实源维护在 `{target}`。
+
+请不要在本文件复制完整项目上下文，避免 `.agent/*` 与 `.codex/*` 漂移。
+"""
+
+
 def context_md(project: str) -> str:
     return f"""# {project} AI Agent Project Context
 
 ## 项目目标
 
-请在首次部署后补充本工程的目标、技术栈、运行方式和关键边界。
+- 本文件由部署脚本初始化。首次接管本项目的 AI agent 必须阅读 README、目录结构、构建配置、测试脚本和主要源码后，把本节改写为真实项目目标。
+- 不要把本初始化说明长期保留为项目事实。
 
 ## 当前状态
 
-- 已部署通用 AI 接管体系：`.agent/context.md`、`.agent/handoff.md`、`.agent/workflow.md`。
+- 已部署多 AI coding agent 工程级接管上下文系统。
+- `.agent/context.md`、`.agent/handoff.md`、`.agent/workflow.md` 是 Codex、Claude Code 和其他 AI agent 共用的单事实源。
+- `AGENTS.md` 和 `CLAUDE.md` 只作为薄入口适配器，不维护完整项目事实。
 - 已部署 Codex hooks 使用量记录：`.agent/scripts/agent-usage-hook.py`。
-- `project-summary.json` 只保存稳定元数据；成本和 ROI 通过派生报告生成。
+- 已部署后台 Codex 任务价值摘要维护器：`.agent/scripts/project-summary-maintainer.sh`。
+- hook 层只维护本机逐轮审计数据；`project-summary.json` 由后台 AI 维护任务级业务价值摘要。
+- 成本、传统成本、节约额和 ROI 通过派生报告生成，不写入 `project-summary.json`。
+
+## 技术栈
+
+- 首次接管时根据真实项目补充语言、框架、数据库/存储、测试、部署方式和外部依赖。
+
+## 关键目录
+
+- `.agent/`：AI agent 共用项目上下文、交接、工作规则、提示和脚本。
+- `.agent/usage/`：AI 使用量数据；`project-summary.json` 是可提交任务级摘要，其他运行数据默认忽略。
+- `.codex/`：Codex 专属配置、hooks 和兼容入口。
+- `.githooks/`：项目级 Git hooks。
+- 首次接管时继续补充本项目业务源码、测试、文档和部署目录。
 
 ## 当前任务
 
-请在每轮收尾时更新本节：
+- 当前没有未完成任务记录。下一次接手时先阅读 `.agent/handoff.md`，再根据用户请求和项目现状更新本节。
 
-1. 本轮完成了什么。
-2. 修改了哪些文件。
-3. 运行了哪些测试或验证。
-4. 还有什么风险和下一步。
+## 最近变更
+
+- 首次部署了 AI agent 工程级接管上下文系统、入口适配器、启动/收尾脚本、Git 身份检查和 Codex 使用量记录。
 
 ## 最近验证
 
+- 首次部署后请运行 `bash -n .agent/scripts/agent-start.sh`。
+- 首次部署后请运行 `bash -n .agent/scripts/agent-finish.sh`。
+- 首次部署后请运行 `bash -n .agent/scripts/project-summary-maintainer.sh`。
 - 首次部署后请运行 `python3 .agent/scripts/agent-usage-hook.py --rebuild-summary`。
+
+## 下一步计划
+
+1. 当前 agent 根据真实项目补全本文件的项目目标、技术栈、关键目录、常用命令和边界。
+2. 把本轮部署结果写入 `.agent/handoff.md`。
+3. 根据项目实际情况补充 `.agent/workflow.md` 中的测试、构建和提交规则。
+
+## 注意事项
+
+- 项目长期事实、当前状态、测试结果和下一步计划只维护在 `.agent/*`。
+- `AGENTS.md`、`CLAUDE.md` 和 `.codex/context.md` / `.codex/handoff.md` 只做入口或兼容指针。
+- 不提交 `.agent/logs/`、`.agent/sessions/`、`.agent/tmp/`、本地认证文件或 Codex 本地运行数据。
+- 修改后优先运行项目测试、构建或静态检查；无法运行时在 `.agent/handoff.md` 写清原因和剩余风险。
 """
 
 
@@ -189,29 +258,52 @@ def handoff_md(project: str) -> str:
 
 ## 本次会话目标
 
-- 首次部署 AI 接管和使用量度量体系。
+- 首次部署 AI agent 工程级接管上下文系统和使用量度量体系。
 
 ## 已完成
 
-- 待当前 agent 收尾时补充。
+- 已创建 `.agent/` 单事实源结构。
+- 已创建 `AGENTS.md` 和 `CLAUDE.md` 薄入口适配器。
+- 已创建启动/收尾提示和脚本。
+- 已接入 Codex 使用量记录和项目级 Git 身份检查。
+- 已接入 Stop 后后台 Codex 任务级价值摘要维护器。
 
 ## 改动文件
 
-- 待当前 agent 收尾时补充。
+- `AGENTS.md`
+- `CLAUDE.md`
+- `.agent/context.md`
+- `.agent/handoff.md`
+- `.agent/workflow.md`
+- `.agent/prompts/start.md`
+- `.agent/prompts/finish.md`
+- `.agent/scripts/`
+- `.agent/usage/`
+- `.agent/prompts/maintain-project-summary.md`
+- `.codex/`
+- `.githooks/pre-commit`
+- `.gitignore`
 
 ## 测试结果
 
-- 待当前 agent 收尾时补充。
+- 首次部署后需要运行 `bash -n .agent/scripts/agent-start.sh`。
+- 首次部署后需要运行 `bash -n .agent/scripts/agent-finish.sh`。
+- 首次部署后需要运行 `bash -n .agent/scripts/project-summary-maintainer.sh`。
+- 首次部署后需要运行 `python3 -m py_compile .agent/scripts/agent-usage-hook.py`。
+- 首次部署后需要运行 `python3 .agent/scripts/agent-usage-hook.py --rebuild-summary`。
 
 ## 遗留问题
 
-- 待当前 agent 收尾时补充。
+- 当前 agent 需要根据真实项目情况补全 `.agent/context.md` 和 `.agent/workflow.md`。
+- 当前 agent 需要把本次部署后的实际验证结果更新到本文件。
 
 ## 下一次接手建议
 
 1. 先读 `.agent/context.md`、本文件、`.agent/workflow.md` 和 `README.md`。
-2. 收尾前运行 `--set-current-turn-metadata` 写入 AI 任务摘要和复杂度。
-3. 收尾后更新 `.agent/context.md` 和 `.agent/handoff.md`。
+2. 确认 `AGENTS.md`、`CLAUDE.md`、`.codex/context.md` 和 `.codex/handoff.md` 没有复制项目事实，只指向 `.agent/*`。
+3. 检查 `.agent/usage/project-summary.json` 是否由后台 maintainer 维护为任务级摘要，而不是逐轮流水。
+4. 收尾前运行 `--set-current-turn-metadata` 写入 AI 任务摘要和复杂度。
+5. 收尾时更新 `.agent/context.md` 和 `.agent/handoff.md`。
 """
 
 
@@ -219,6 +311,12 @@ def workflow_md(project: str) -> str:
     return f"""# {project} AI Agent Workflow
 
 本文件是本工程的通用 AI coding agent 工作规则。`AGENTS.md`、`CLAUDE.md` 等入口只做薄适配，长期事实源应维护在 `.agent/*`。
+
+## 项目定位
+
+- 本文件描述 AI agent 如何接管、开发、验证和收尾本项目。
+- 项目业务目标、当前状态和下一步计划维护在 `.agent/context.md`。
+- 最近一次会话交接维护在 `.agent/handoff.md`。
 
 ## 启动要求
 
@@ -234,6 +332,13 @@ def workflow_md(project: str) -> str:
 
 ```bash
 ./.agent/scripts/agent-start.sh codex
+```
+
+也可以显式切换身份：
+
+```bash
+./.agent/scripts/agent-start.sh claude
+./.agent/scripts/agent-start.sh none
 ```
 
 ## 收尾要求
@@ -254,11 +359,54 @@ python3 .agent/scripts/agent-usage-hook.py --set-current-turn-metadata \\
   --reason "AI 评估复杂度的依据"
 ```
 
+可运行：
+
+```bash
+./.agent/scripts/agent-finish.sh
+```
+
+## 常用命令
+
+首次部署后至少验证：
+
+```bash
+bash -n .agent/scripts/agent-start.sh
+bash -n .agent/scripts/agent-finish.sh
+bash -n .agent/scripts/project-summary-maintainer.sh
+python3 -m py_compile .agent/scripts/agent-usage-hook.py
+python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
+git diff --check
+```
+
+请根据项目实际情况补充构建、测试、格式化、lint、启动和部署命令。
+
+## 开发约定
+
+- 改代码前先阅读相关文件，不凭空假设项目结构。
+- 优先沿用项目已有框架、目录、命名和测试风格。
+- 不做无关重构，不引入和当前任务无关的格式化 churn。
+- 如果用户只要求分析，先给出基于文件和运行结果的诊断；如果用户要求修复，直接实现并验证。
+
+## 安全边界
+
+- 不提交 API key、token、认证文件、私有会话、运行日志或本地路径明细。
+- `.agent/auth.json`、`.agent/logs/`、`.agent/sessions/`、`.agent/tmp/` 和 `.codex/*` 本地运行数据必须保持忽略。
+- `project-summary.json` 只保留脱敏稳定元数据；成本和 ROI 报告本地派生。
+
+## 测试建议
+
+- 小改动至少运行相关单测、类型检查、lint 或脚本语法检查。
+- 影响用户流程、CLI、Web UI 或跨模块契约时，补充端到端或集成验证。
+- 无法运行测试时，在 `.agent/handoff.md` 记录具体命令、失败原因和剩余风险。
+
 ## AI 使用量与业务价值记录
 
 - Codex hooks 在 `.codex/hooks.json` 中接入；项目级 `.codex/config.toml` 需要保留 `[features].codex_hooks = true`。
+- hook 层负责本机逐轮审计：token、耗时、模型、Git 状态、prompt/assistant 本地明细等。
 - `.agent/usage/codex-turns.jsonl` 和 `.agent/usage/summary.json` 是本机运行数据，默认忽略，不提交。
-- `.agent/usage/project-summary.json` 是可提交摘要，只保存 token、耗时、模型、AI 任务摘要、AI 复杂度和 Git 闭环等稳定元数据。
+- Stop hook 会在记录本轮审计数据后，后台启动 `.agent/scripts/project-summary-maintainer.sh`。
+- project-summary 层由后台 Codex maintainer 维护：允许把多轮对话合并为一个任务，也允许咨询、纯 Git 提交、无交付轮次只留在 hook 元数据中。
+- `.agent/usage/project-summary.json` 是可提交任务级业务价值摘要，只保存稳定、脱敏、可审查的任务级字段。
 - `project-summary.json` 不提交完整用户 prompt、assistant 输出、session id、transcript 路径、本机路径、成本或 ROI。
 - 成本、传统成本、节约额和 ROI 只能通过脚本基于 `project-summary.json` 另行生成：
 
@@ -271,6 +419,13 @@ python3 .agent/scripts/agent-usage-hook.py --write-value-report
 - Codex 使用 `Codex <noreply@openai.com>`。
 - Claude Code 使用 `Claude <noreply@anthropic.com>`。
 - 运行 `./.agent/scripts/agent-start.sh codex` 或 `./.agent/scripts/agent-start.sh claude` 会设置本仓库本地身份。
+- `.githooks/pre-commit` 会在提交前检查 AI agent 身份，避免 AI 提交继承人工 Git 身份。
+
+## Git 提交规范
+
+- 提交前查看 `git status --short` 和相关 diff，确认只提交本任务范围内的改动。
+- 提交信息优先使用 Conventional Commits，例如 `docs(agent): 增加 AI 接管上下文`。
+- 如果启用了 `--strict-commit-msg`，`.githooks/commit-msg` 会执行基础 Conventional Commits 检查。
 """
 
 
@@ -294,7 +449,7 @@ def start_prompt() -> str:
 2. 当前任务或你认为最合理的下一步
 3. 下一步执行计划
 
-在用户确认前，不要修改代码，除非用户明确要求直接实现。
+如果用户已经明确要求实现或修复，请在完成上述阅读后直接继续执行，并在收尾时更新 `.agent/context.md` 和 `.agent/handoff.md`。
 """
 
 
@@ -320,6 +475,145 @@ python3 .agent/scripts/agent-usage-hook.py --set-current-turn-metadata \
 7. 写清楚下一次 AI agent 应该从哪里继续
 
 如果本次没有改代码，也要说明只改了文档、脚本或上下文。
+"""
+
+
+def maintain_project_summary_prompt() -> str:
+    return """你是本项目的后台 Codex 任务价值摘要维护器。
+
+目标：根据 hook 层本机审计数据，维护 `.agent/usage/project-summary.json` 这个可提交的任务级业务价值摘要。
+
+请严格遵守：
+
+1. 只允许修改 `.agent/usage/project-summary.json`。
+2. 读取 `.agent/usage/codex-turns.jsonl`、`.agent/usage/summary.json` 和现有 `.agent/usage/project-summary.json`。
+3. hook 层数据是逐轮审计事实源，保留在本机；不要把原始 prompt、assistant 输出、session_id、turn_id、transcript_path、本机绝对路径、API key、token 或 secret 写入 `project-summary.json`。
+4. `project-summary.json` 是任务级业务价值摘要，不是逐轮流水。可以把多个 turn 合并成一个任务。
+5. 咨询、纯 Git 提交、hook smoke、上下文整理、无交付结果等轮次，如果没有独立业务交付，可以只留在 hook 审计数据中，不要加入 `tasks[]`。
+6. 不要写成本、传统成本、节约额或 ROI；这些由脚本从 `project-summary.json` 派生。
+7. 保持 JSON 有效、稳定、可 diff。不要输出 Markdown，不要修改其他文件。
+
+推荐 schema：
+
+```json
+{
+  "schema_version": 3,
+  "project": "<repo-name>",
+  "updated_at": "<UTC ISO timestamp>",
+  "maintained_by": "codex_project_summary_maintainer",
+  "source_layers": {
+    "hook_audit_records": ".agent/usage/codex-turns.jsonl",
+    "local_audit_summary": ".agent/usage/summary.json",
+    "task_value_summary": ".agent/usage/project-summary.json"
+  },
+  "totals": {
+    "audit_recorded_turns": 0,
+    "value_task_count": 0,
+    "included_turn_count": 0,
+    "excluded_turn_count": 0
+  },
+  "tasks": [
+    {
+      "task_id": "task-YYYYMMDD-001",
+      "title": "短标题",
+      "summary": "任务级交付摘要",
+      "status": "delivered",
+      "value_included": true,
+      "included_turn_indexes": [1],
+      "started_at": "<UTC ISO timestamp>",
+      "ended_at": "<UTC ISO timestamp>",
+      "elapsed_seconds": 0,
+      "primary_model": "unknown",
+      "models": ["unknown"],
+      "token_usage": {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 0
+      },
+      "git": {
+        "closed_loop": false,
+        "commits": []
+      },
+      "business_value": {
+        "description": "面向业务的价值说明",
+        "complexity": "low",
+        "complexity_reason": "复杂度判断依据",
+        "complexity_source": "project_summary_maintainer"
+      }
+    }
+  ],
+  "privacy": {
+    "contains_user_prompts": false,
+    "contains_assistant_outputs": false,
+    "contains_session_ids": false,
+    "contains_transcript_paths": false,
+    "contains_local_paths": false,
+    "contains_derived_costs": false,
+    "contains_roi": false,
+    "task_descriptions_are_ai_maintained": true
+  },
+  "notes": []
+}
+```
+
+维护规则：
+
+- 优先复用已有 `task_id`，不要因为新增一轮就重排旧任务。
+- `included_turn_indexes` 使用 hook 审计记录的顺序号，不使用 session_id 或 turn_id。
+- `token_usage` 和 `elapsed_seconds` 是该任务包含 turns 的合计。
+- `primary_model` 选择该任务主要使用的模型；`models` 列出参与模型。
+- `business_value.complexity` 只能是 `low`、`medium`、`high` 或 `unknown`。
+- 如果无法可靠判断业务价值，保守地把该轮排除在 `tasks[]` 外，只更新 totals。
+"""
+
+
+def project_summary_maintainer_sh() -> str:
+    return """#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT"
+
+USAGE_DIR="${AGENT_USAGE_DIR:-$ROOT/.agent/usage}"
+PROMPT_FILE="$ROOT/.agent/prompts/maintain-project-summary.md"
+LOCK_FILE="$USAGE_DIR/project-summary-maintainer.lock"
+
+mkdir -p "$USAGE_DIR"
+
+if [ ! -f "$PROMPT_FILE" ]; then
+  echo "project-summary maintainer prompt missing: $PROMPT_FILE" >&2
+  exit 0
+fi
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "codex command not found; project-summary maintainer skipped" >&2
+  exit 0
+fi
+
+run_maintainer() {
+  export AGENT_USAGE_HOOK_DISABLED=1
+  export AGENT_PROJECT_SUMMARY_MAINTAINER=1
+  export AGENT_USAGE_DIR="$USAGE_DIR"
+
+  codex exec \
+    -C "$ROOT" \
+    -s workspace-write \
+    -a never \
+    -c features.codex_hooks=false \
+    - < "$PROMPT_FILE"
+}
+
+if command -v flock >/dev/null 2>&1; then
+  (
+    flock -n 9 || exit 0
+    run_maintainer
+  ) 9>"$LOCK_FILE"
+else
+  run_maintainer
+fi
 """
 
 
@@ -555,7 +849,7 @@ def hooks_json() -> str:
                             "type": "command",
                             "command": 'python3 "$(git rev-parse --show-toplevel)/.agent/scripts/agent-usage-hook.py"',
                             "timeout": 30,
-                            "statusMessage": "Recording AI usage summary",
+                            "statusMessage": "Recording AI usage and queueing value summary",
                         }
                     ]
                 }
@@ -568,18 +862,23 @@ def hooks_json() -> str:
 def usage_readme() -> str:
     return """# AI Agent Usage Data
 
-本目录用于记录 AI coding agent 的工程级使用量和业务价值指标。
+本目录用于记录 AI coding agent 的工程级使用量和业务价值指标。数据分两层：
 
-- `project-summary.json`：脱敏汇总，可提交到 Git，只保存稳定元数据。
+- hook 层：逐轮记录 token、耗时、模型、Git 状态等本机审计数据。
+- project-summary 层：由后台 Codex maintainer 维护任务级业务价值摘要。
+
+- `project-summary.json`：任务级脱敏摘要，可提交到 Git；允许多轮合并为一个任务。
 - `codex-turns.jsonl`：逐轮原始明细，包含用户输入和 assistant 输出，默认忽略，不提交。
-- `summary.json`：本机完整汇总，包含本机路径等运行信息，默认忽略。
+- `summary.json`：hook 层本机审计汇总，包含本机路径等运行信息，默认忽略。
 - `value-report.json`：从 `project-summary.json` 和当前脚本策略生成的派生成本报告，默认忽略，不提交。
+- `project-summary-maintainer.log`：后台 maintainer 运行日志，默认忽略。
 - `pending/`、`.lock`、`hook-errors.log`：hook 运行时文件，默认忽略。
 
 常用命令：
 
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
+python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
 python3 .agent/scripts/agent-usage-hook.py --write-value-report
 ```
 """
@@ -677,9 +976,11 @@ def deploy(args: argparse.Namespace) -> int:
     write_file(root / ".agent" / "workflow.md", workflow_md(project), force=force, report=report)
     write_file(root / ".agent" / "prompts" / "start.md", start_prompt(), force=force, report=report)
     write_file(root / ".agent" / "prompts" / "finish.md", finish_prompt(), force=force, report=report)
+    write_file(root / ".agent" / "prompts" / "maintain-project-summary.md", maintain_project_summary_prompt(), force=force, report=report)
     write_file(root / ".agent" / "scripts" / "agent-start.sh", agent_start_sh(), force=force, executable=True, report=report)
     write_file(root / ".agent" / "scripts" / "agent-finish.sh", agent_finish_sh(), force=force, executable=True, report=report)
     write_file(root / ".agent" / "scripts" / "agent-identity.sh", agent_identity_sh(key), force=force, executable=True, report=report)
+    write_file(root / ".agent" / "scripts" / "project-summary-maintainer.sh", project_summary_maintainer_sh(), force=force, executable=True, report=report)
     copy_file(HOOK_ASSET, root / ".agent" / "scripts" / "agent-usage-hook.py", force=force, executable=True, report=report)
     write_file(root / ".agent" / "usage" / "README.md", usage_readme(), force=force, report=report)
 
@@ -687,6 +988,8 @@ def deploy(args: argparse.Namespace) -> int:
     update_codex_config(root, report)
     write_file(root / ".codex" / "prompts" / "start.md", start_prompt(), force=force, report=report)
     write_file(root / ".codex" / "prompts" / "finish.md", finish_prompt(), force=force, report=report)
+    write_file(root / ".codex" / "context.md", codex_pointer_md(".agent/context.md"), force=force, report=report)
+    write_file(root / ".codex" / "handoff.md", codex_pointer_md(".agent/handoff.md"), force=force, report=report)
     write_file(root / ".codex" / "scripts" / "codex-start.sh", codex_start_sh(), force=force, executable=True, report=report)
     write_file(root / ".codex" / "scripts" / "codex-finish.sh", codex_finish_sh(), force=force, executable=True, report=report)
 
@@ -697,6 +1000,7 @@ def deploy(args: argparse.Namespace) -> int:
         write_file(root / ".githooks" / "commit-msg", commit_msg_sh(), force=force, executable=True, report=report)
 
     append_gitignore(root, report)
+    append_readme_entry(root, report)
 
     usage_dir = root / ".agent" / "usage"
     usage_dir.mkdir(parents=True, exist_ok=True)
