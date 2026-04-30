@@ -73,7 +73,7 @@ bash -n .agent/scripts/agent-finish.sh
 bash -n .agent/scripts/project-summary-maintainer.sh
 python3 -m py_compile .agent/scripts/agent-usage-hook.py
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
-python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
+python3 .agent/scripts/agent-usage-hook.py --refresh-project-summary
 python3 .agent/scripts/agent-usage-hook.py --print-value-report >/tmp/agent-value-report.json
 git diff --check
 ```
@@ -83,7 +83,7 @@ git diff --check
 在目标仓库运行部署脚本后，可能生成：
 
 - `.agent/context.md`、`.agent/handoff.md`、`.agent/workflow.md`
-- `.agent/prompts/start.md`、`.agent/prompts/finish.md`、`maintain-project-summary.md`
+- `.agent/prompts/start.md`、`.agent/prompts/finish.md`、`generate_value_report_site.py`
 - `.agent/scripts/agent-start.sh`、`agent-finish.sh`、`agent-identity.sh`、`agent-usage-hook.py`、`project-summary-maintainer.sh`
 - `.agent/usage/README.md`、本机 hook 审计汇总和初始化的 `project-summary.json`
 - `.codex/hooks.json`、`.codex/config.toml`、`.codex/prompts/*`、`.codex/scripts/*`
@@ -181,7 +181,7 @@ python3 -m py_compile "$tmp_repo/.agent/scripts/agent-usage-hook.py"
 (
   cd "$tmp_repo"
   python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
-  python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
+  python3 .agent/scripts/agent-usage-hook.py --refresh-project-summary
 )
 ```
 

@@ -18,6 +18,7 @@ from typing import Any
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 HOOK_ASSET = SKILL_ROOT / "assets" / "agent-usage-hook.py"
+REPORT_SITE_ASSET = SKILL_ROOT / "assets" / "generate_value_report_site.py"
 
 
 def utc_stamp() -> str:
@@ -207,7 +208,8 @@ def context_md(project: str) -> str:
 - `.agent/context.md`、`.agent/handoff.md`、`.agent/workflow.md` 是 Codex、Claude Code 和其他 AI agent 共用的单事实源。
 - `AGENTS.md` 和 `CLAUDE.md` 只作为薄入口适配器，不维护完整项目事实。
 - 已部署 Codex hooks 使用量记录：`.agent/scripts/agent-usage-hook.py`。
-- 已部署后台 Codex 任务价值摘要维护器：`.agent/scripts/project-summary-maintainer.sh`。
+- 已部署后台 Codex 任务价值摘要维护器：`.agent/scripts/agent-usage-hook.py --run-project-summary-agent`。
+- 已部署本机 HTML 价值报告生成器：`.agent/scripts/generate-value-report-site.sh`。
 - hook 层只维护本机逐轮审计数据；`project-summary.json` 由后台 AI 维护任务级业务价值摘要。
 - 成本、传统成本、节约额和 ROI 通过派生报告生成，不写入 `project-summary.json`。
 
@@ -236,6 +238,7 @@ def context_md(project: str) -> str:
 - 首次部署后请运行 `bash -n .agent/scripts/agent-start.sh`。
 - 首次部署后请运行 `bash -n .agent/scripts/agent-finish.sh`。
 - 首次部署后请运行 `bash -n .agent/scripts/project-summary-maintainer.sh`。
+- 首次部署后请运行 `bash -n .agent/scripts/generate-value-report-site.sh`。
 - 首次部署后请运行 `python3 .agent/scripts/agent-usage-hook.py --rebuild-summary`。
 
 ## 下一步计划
@@ -267,6 +270,7 @@ def handoff_md(project: str) -> str:
 - 已创建启动/收尾提示和脚本。
 - 已接入 Codex 使用量记录和项目级 Git 身份检查。
 - 已接入 Stop 后后台 Codex 任务级价值摘要维护器。
+- 已接入提交后 Git 闭环回填和本机 HTML 价值报告刷新。
 
 ## 改动文件
 
@@ -279,7 +283,7 @@ def handoff_md(project: str) -> str:
 - `.agent/prompts/finish.md`
 - `.agent/scripts/`
 - `.agent/usage/`
-- `.agent/prompts/maintain-project-summary.md`
+- `.agent/scripts/generate_value_report_site.py`
 - `.codex/`
 - `.githooks/pre-commit`
 - `.gitignore`
@@ -289,6 +293,7 @@ def handoff_md(project: str) -> str:
 - 首次部署后需要运行 `bash -n .agent/scripts/agent-start.sh`。
 - 首次部署后需要运行 `bash -n .agent/scripts/agent-finish.sh`。
 - 首次部署后需要运行 `bash -n .agent/scripts/project-summary-maintainer.sh`。
+- 首次部署后需要运行 `bash -n .agent/scripts/generate-value-report-site.sh`。
 - 首次部署后需要运行 `python3 -m py_compile .agent/scripts/agent-usage-hook.py`。
 - 首次部署后需要运行 `python3 .agent/scripts/agent-usage-hook.py --rebuild-summary`。
 
@@ -373,6 +378,7 @@ python3 .agent/scripts/agent-usage-hook.py --set-current-turn-metadata \\
 bash -n .agent/scripts/agent-start.sh
 bash -n .agent/scripts/agent-finish.sh
 bash -n .agent/scripts/project-summary-maintainer.sh
+bash -n .agent/scripts/generate-value-report-site.sh
 python3 -m py_compile .agent/scripts/agent-usage-hook.py
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
 git diff --check
@@ -404,14 +410,16 @@ git diff --check
 - Codex hooks 在 `.codex/hooks.json` 中接入；项目级 `.codex/config.toml` 需要保留 `[features].codex_hooks = true`。
 - hook 层负责本机逐轮审计：token、耗时、模型、Git 状态、prompt/assistant 本地明细等。
 - `.agent/usage/codex-turns.jsonl` 和 `.agent/usage/summary.json` 是本机运行数据，默认忽略，不提交。
-- Stop hook 会在记录本轮审计数据后，后台启动 `.agent/scripts/project-summary-maintainer.sh`。
+- Stop hook 会在记录本轮审计数据后，后台启动 `python3 .agent/scripts/agent-usage-hook.py --run-project-summary-agent --record-id <record-id>`。
 - project-summary 层由后台 Codex maintainer 维护：允许把多轮对话合并为一个任务，也允许咨询、纯 Git 提交、无交付轮次只留在 hook 元数据中。
 - `.agent/usage/project-summary.json` 是可提交任务级业务价值摘要，只保存稳定、脱敏、可审查的任务级字段。
 - `project-summary.json` 不提交完整用户 prompt、assistant 输出、session id、transcript 路径、本机路径、成本或 ROI。
+- `.githooks/post-commit` 会尝试把最新未闭环任务绑定到刚生成的提交 SHA，并刷新默认忽略的 HTML 价值报告。
 - 成本、传统成本、节约额和 ROI 只能通过脚本基于 `project-summary.json` 另行生成：
 
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --write-value-report
+./.agent/scripts/generate-value-report-site.sh
 ```
 
 ## Git 身份
@@ -578,42 +586,24 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT"
 
 USAGE_DIR="${AGENT_USAGE_DIR:-$ROOT/.agent/usage}"
-PROMPT_FILE="$ROOT/.agent/prompts/maintain-project-summary.md"
-LOCK_FILE="$USAGE_DIR/project-summary-maintainer.lock"
 
-mkdir -p "$USAGE_DIR"
+export AGENT_USAGE_DIR="$USAGE_DIR"
+python3 "$ROOT/.agent/scripts/agent-usage-hook.py" --run-project-summary-agent "$@"
+"""
 
-if [ ! -f "$PROMPT_FILE" ]; then
-  echo "project-summary maintainer prompt missing: $PROMPT_FILE" >&2
-  exit 0
-fi
 
-if ! command -v codex >/dev/null 2>&1; then
-  echo "codex command not found; project-summary maintainer skipped" >&2
-  exit 0
-fi
+def generate_value_report_site_sh() -> str:
+    return """#!/usr/bin/env bash
+set -euo pipefail
 
-run_maintainer() {
-  export AGENT_USAGE_HOOK_DISABLED=1
-  export AGENT_PROJECT_SUMMARY_MAINTAINER=1
-  export AGENT_USAGE_DIR="$USAGE_DIR"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+USAGE_DIR="${USAGE_DIR:-$ROOT_DIR/.agent/usage}"
+OUTPUT="${OUTPUT:-$ROOT_DIR/.agent/usage/value-report.html}"
 
-  codex exec \
-    -C "$ROOT" \
-    -s workspace-write \
-    -a never \
-    -c features.codex_hooks=false \
-    - < "$PROMPT_FILE"
-}
-
-if command -v flock >/dev/null 2>&1; then
-  (
-    flock -n 9 || exit 0
-    run_maintainer
-  ) 9>"$LOCK_FILE"
-else
-  run_maintainer
-fi
+python3 "$ROOT_DIR/.agent/scripts/generate_value_report_site.py" \\
+  --usage-dir "$USAGE_DIR" \\
+  --output "$OUTPUT" \\
+  "$@"
 """
 
 
@@ -871,15 +861,17 @@ def usage_readme() -> str:
 - `codex-turns.jsonl`：逐轮原始明细，包含用户输入和 assistant 输出，默认忽略，不提交。
 - `summary.json`：hook 层本机审计汇总，包含本机路径等运行信息，默认忽略。
 - `value-report.json`：从 `project-summary.json` 和当前脚本策略生成的派生成本报告，默认忽略，不提交。
-- `project-summary-maintainer.log`：后台 maintainer 运行日志，默认忽略。
+- `value-report.html`：本机交互式 HTML 价值报告，默认忽略，不提交。
+- `project-summary-agent/`：后台 maintainer 的 prompt、schema、输出和 job 日志，默认忽略。
 - `pending/`、`.lock`、`hook-errors.log`：hook 运行时文件，默认忽略。
 
 常用命令：
 
 ```bash
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
-python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
+python3 .agent/scripts/agent-usage-hook.py --refresh-project-summary
 python3 .agent/scripts/agent-usage-hook.py --write-value-report
+./.agent/scripts/generate-value-report-site.sh
 ```
 """
 
@@ -939,6 +931,29 @@ fi
 """
 
 
+def post_commit_sh() -> str:
+    return """#!/usr/bin/env sh
+set -eu
+
+if [ "${AGENT_USAGE_POST_COMMIT_ACTIVE:-}" = "1" ]; then
+  exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT"
+
+if [ -x ./.agent/scripts/agent-usage-hook.py ]; then
+  AGENT_USAGE_POST_COMMIT_ACTIVE=1 \\
+    python3 ./.agent/scripts/agent-usage-hook.py --finalize-latest-project-task-from-git >/dev/null 2>&1 || true
+fi
+
+if [ -x ./.agent/scripts/generate-value-report-site.sh ]; then
+  AGENT_USAGE_POST_COMMIT_ACTIVE=1 \\
+    ./.agent/scripts/generate-value-report-site.sh >/dev/null 2>&1 || true
+fi
+"""
+
+
 def commit_msg_sh() -> str:
     return """#!/usr/bin/env sh
 set -eu
@@ -976,12 +991,13 @@ def deploy(args: argparse.Namespace) -> int:
     write_file(root / ".agent" / "workflow.md", workflow_md(project), force=force, report=report)
     write_file(root / ".agent" / "prompts" / "start.md", start_prompt(), force=force, report=report)
     write_file(root / ".agent" / "prompts" / "finish.md", finish_prompt(), force=force, report=report)
-    write_file(root / ".agent" / "prompts" / "maintain-project-summary.md", maintain_project_summary_prompt(), force=force, report=report)
     write_file(root / ".agent" / "scripts" / "agent-start.sh", agent_start_sh(), force=force, executable=True, report=report)
     write_file(root / ".agent" / "scripts" / "agent-finish.sh", agent_finish_sh(), force=force, executable=True, report=report)
     write_file(root / ".agent" / "scripts" / "agent-identity.sh", agent_identity_sh(key), force=force, executable=True, report=report)
     write_file(root / ".agent" / "scripts" / "project-summary-maintainer.sh", project_summary_maintainer_sh(), force=force, executable=True, report=report)
+    write_file(root / ".agent" / "scripts" / "generate-value-report-site.sh", generate_value_report_site_sh(), force=force, executable=True, report=report)
     copy_file(HOOK_ASSET, root / ".agent" / "scripts" / "agent-usage-hook.py", force=force, executable=True, report=report)
+    copy_file(REPORT_SITE_ASSET, root / ".agent" / "scripts" / "generate_value_report_site.py", force=force, executable=True, report=report)
     write_file(root / ".agent" / "usage" / "README.md", usage_readme(), force=force, report=report)
 
     write_file(root / ".codex" / "hooks.json", hooks_json(), force=force, report=report)
@@ -996,6 +1012,7 @@ def deploy(args: argparse.Namespace) -> int:
     write_file(root / "AGENTS.md", agents_md("codex"), force=force, report=report)
     write_file(root / "CLAUDE.md", agents_md("claude"), force=force, report=report)
     write_file(root / ".githooks" / "pre-commit", pre_commit_sh(), force=force, executable=True, report=report)
+    write_file(root / ".githooks" / "post-commit", post_commit_sh(), force=force, executable=True, report=report)
     if args.strict_commit_msg:
         write_file(root / ".githooks" / "commit-msg", commit_msg_sh(), force=force, executable=True, report=report)
 

@@ -43,7 +43,7 @@ bash -n .agent/scripts/agent-finish.sh
 bash -n .agent/scripts/project-summary-maintainer.sh
 python3 -m py_compile .agent/scripts/agent-usage-hook.py
 python3 .agent/scripts/agent-usage-hook.py --rebuild-summary
-python3 .agent/scripts/agent-usage-hook.py --ensure-project-summary
+python3 .agent/scripts/agent-usage-hook.py --refresh-project-summary
 python3 .agent/scripts/agent-usage-hook.py --print-value-report >/tmp/agent-value-report.json
 git diff --check
 ```
@@ -51,7 +51,7 @@ git diff --check
 ## What Gets Deployed
 
 - `.agent/context.md`, `.agent/handoff.md`, `.agent/workflow.md`
-- `.agent/prompts/start.md`, `.agent/prompts/finish.md`, `maintain-project-summary.md`
+- `.agent/prompts/start.md`, `.agent/prompts/finish.md`, `generate_value_report_site.py`
 - `.agent/scripts/agent-start.sh`, `agent-finish.sh`, `agent-identity.sh`, `agent-usage-hook.py`, `project-summary-maintainer.sh`
 - `.agent/usage/README.md`, local hook audit summary, and initialized `project-summary.json`
 - `.codex/hooks.json`, `.codex/config.toml` hook enablement, `.codex/prompts/*`, `.codex/scripts/*`

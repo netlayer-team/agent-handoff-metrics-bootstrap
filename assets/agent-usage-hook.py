@@ -3,17 +3,18 @@
 
 This script is designed to be called by Codex hooks. It records the prompt at
 UserPromptSubmit and completes the turn record at Stop by reading Codex's
-transcript token_count events. Stop also queues a background Codex maintainer
-that updates the task-level project-summary.json separately from hook metadata.
+transcript token_count events.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -36,8 +37,24 @@ USAGE_KEYS = (
 )
 
 PROJECT_SUMMARY_SCHEMA_VERSION = 3
-HOOK_DISABLED_ENV = "AGENT_USAGE_HOOK_DISABLED"
-MAINTAINER_DISABLED_ENV = "AGENT_PROJECT_SUMMARY_MAINTAINER_DISABLED"
+COMPLEXITY_LEVELS = {"low", "medium", "high", "unknown"}
+PROJECT_TASK_STATUSES = {"in_progress", "completed", "cancelled"}
+PROJECT_TASK_CATEGORIES = {
+    "implementation",
+    "debugging",
+    "design",
+    "review",
+    "ops",
+    "documentation",
+    "maintenance",
+    "other",
+}
+
+MAINTAINER_ENV_FLAG = "AGENT_USAGE_MAINTAINER"
+MAINTAINER_ACTIVE_ENV = "AGENT_USAGE_MAINTAINER_ACTIVE"
+MAINTAINER_MODEL_ENV = "AGENT_USAGE_MAINTAINER_MODEL"
+MAINTAINER_SYNC_ENV = "AGENT_USAGE_MAINTAINER_SYNC"
+DEFAULT_MAINTAINER_MODEL = "gpt-5.4-mini"
 
 DEFAULT_USD_TO_CNY = 7.20
 DEFAULT_ENGINEER_HOURLY_RATE_CNY = 300.0
@@ -105,7 +122,7 @@ def resolve_repo_root(cwd_value: str | None) -> Path:
 
 
 def usage_dir(root: Path) -> Path:
-    override = os.environ.get("AGENT_USAGE_DIR") or os.environ.get("CLRSP_AGENT_USAGE_DIR")
+    override = os.environ.get("AGENT_USAGE_DIR")
     if override:
         path = Path(override)
         return path if path.is_absolute() else root / path
@@ -154,21 +171,22 @@ def env_float(name: str, default: float, *, minimum: float | None = None) -> flo
 
 def cost_policy() -> dict[str, Any]:
     hours = {
-        level: env_float(f"CLRSP_AGENT_TRADITIONAL_HOURS_{level.upper()}", default, minimum=0.0)
+        level: env_float(f"AGENT_TRADITIONAL_HOURS_{level.upper()}", default, minimum=0.0)
         for level, default in DEFAULT_TRADITIONAL_HOURS.items()
     }
     return {
         "currency": "CNY",
-        "usd_to_cny": env_float("CLRSP_AGENT_USD_TO_CNY", DEFAULT_USD_TO_CNY, minimum=0.000001),
-        "usd_to_cny_source": "CLRSP_AGENT_USD_TO_CNY or project default",
+        "usd_to_cny": env_float("AGENT_USD_TO_CNY", DEFAULT_USD_TO_CNY, minimum=0.000001),
+        "usd_to_cny_source": "AGENT_USD_TO_CNY or project default",
         "engineer_hourly_rate_cny": env_float(
-            "CLRSP_AGENT_ENGINEER_HOURLY_RATE_CNY",
+            "AGENT_ENGINEER_HOURLY_RATE_CNY",
             DEFAULT_ENGINEER_HOURLY_RATE_CNY,
             minimum=0.0,
         ),
         "traditional_hours_by_complexity": hours,
         "model_price_source": "OpenAI API pricing, standard processing, USD per 1M tokens",
-        "model_price_overrides": "edit MODEL_PRICES_USD_PER_1M or set project-specific hook policy",
+        "model_prices_usd_per_1m": MODEL_PRICES_USD_PER_1M,
+        "model_price_overrides": "edit MODEL_PRICES_USD_PER_1M, set project-specific hook policy, or adjust generated HTML controls",
     }
 
 
@@ -252,6 +270,24 @@ def estimate_turn_economics(
         "output_usd_per_1m": price.get("output") if price else None,
         "ai_cost_usd": round_money(ai_cost_usd, 6),
         "ai_cost_cny": round_money(ai_cost_cny, 4),
+        "input_cost_cny": round_money(
+            (input_cost_usd + cached_input_cost_usd) * float(policy["usd_to_cny"])
+            if input_cost_usd is not None and cached_input_cost_usd is not None
+            else None,
+            4,
+        ),
+        "uncached_input_cost_cny": round_money(
+            input_cost_usd * float(policy["usd_to_cny"]) if input_cost_usd is not None else None,
+            4,
+        ),
+        "cached_input_cost_cny": round_money(
+            cached_input_cost_usd * float(policy["usd_to_cny"]) if cached_input_cost_usd is not None else None,
+            4,
+        ),
+        "output_cost_cny": round_money(
+            output_cost_usd * float(policy["usd_to_cny"]) if output_cost_usd is not None else None,
+            4,
+        ),
         "ai_cost_breakdown_usd": {
             "uncached_input": round_money(input_cost_usd, 6),
             "cached_input": round_money(cached_input_cost_usd, 6),
@@ -405,7 +441,54 @@ def public_task_description(record: dict[str, Any]) -> dict[str, str]:
 
 def normalize_complexity(value: Any) -> str:
     normalized = str(value or "").strip().lower()
-    return normalized if normalized in {"low", "medium", "high", "unknown"} else "unknown"
+    return normalized if normalized in COMPLEXITY_LEVELS else "unknown"
+
+
+def normalize_project_task_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in PROJECT_TASK_STATUSES else "completed"
+
+
+def normalize_project_task_category(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in PROJECT_TASK_CATEGORIES else "other"
+
+
+def parse_bool_flag(value: Any, *, default: bool | None = None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def stable_task_id(value: str | None, fallback: str | None = None) -> str:
+    raw = (value or fallback or "ai-task").strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", "-", raw)
+    raw = re.sub(r"-+", "-", raw).strip("-")
+    if raw:
+        return truncate_text(raw, 80)
+    digest = hashlib.sha1((value or fallback or "ai-task").encode("utf-8")).hexdigest()[:10]
+    return f"ai-task-{digest}"
+
+
+def parse_turn_index_list(value: str | None) -> list[int]:
+    if not value:
+        return []
+    indices: list[int] = []
+    for part in re.split(r"[,\s]+", value.strip()):
+        if not part:
+            continue
+        try:
+            parsed = int(part)
+        except ValueError:
+            continue
+        if parsed > 0 and parsed not in indices:
+            indices.append(parsed)
+    return indices
 
 
 def public_task_complexity(record: dict[str, Any]) -> dict[str, str | None]:
@@ -568,6 +651,25 @@ def git_snapshot(root: Path, started_at: str | None, start_git: dict[str, Any] |
     }
 
 
+def latest_git_commit(root: Path) -> dict[str, Any] | None:
+    commit_raw = run_text(
+        ["git", "log", "-1", "--format=%cI%x00%H%x00%an%x00%ae%x00%s"],
+        root,
+    )
+    if not commit_raw:
+        return None
+    parts = commit_raw.split("\x00", 4)
+    if len(parts) != 5:
+        return None
+    return {
+        "committed_at": parts[0],
+        "sha": parts[1],
+        "author_name": parts[2],
+        "author_email": parts[3],
+        "subject": parts[4],
+    }
+
+
 class UsageLock:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -601,52 +703,10 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def initial_project_summary(root: Path) -> dict[str, Any]:
-    return {
-        "schema_version": PROJECT_SUMMARY_SCHEMA_VERSION,
-        "project": root.name,
-        "updated_at": utc_now(),
-        "maintained_by": "codex_project_summary_maintainer",
-        "source_layers": {
-            "hook_audit_records": ".agent/usage/codex-turns.jsonl",
-            "local_audit_summary": ".agent/usage/summary.json",
-            "task_value_summary": ".agent/usage/project-summary.json",
-        },
-        "totals": {
-            "audit_recorded_turns": 0,
-            "value_task_count": 0,
-            "included_turn_count": 0,
-            "excluded_turn_count": 0,
-        },
-        "tasks": [],
-        "privacy": {
-            "contains_user_prompts": False,
-            "contains_assistant_outputs": False,
-            "contains_session_ids": False,
-            "contains_transcript_paths": False,
-            "contains_local_paths": False,
-            "contains_derived_costs": False,
-            "contains_roi": False,
-            "task_descriptions_are_ai_maintained": True,
-        },
-        "notes": [
-            "hook layer owns per-turn local audit metadata",
-            "project-summary layer is maintained by a background Codex maintainer at task granularity",
-            "multiple turns may be merged into one task",
-            "consultation, pure Git bookkeeping, and no-deliverable turns may remain only in hook audit records",
-            "cost and ROI are derived separately from this task-level summary and current policy",
-        ],
-    }
-
-
-def ensure_project_summary(root: Path, out_dir: Path) -> dict[str, Any]:
-    path = out_dir / "project-summary.json"
-    existing = load_json(path)
-    if isinstance(existing, dict):
-        return existing
-    summary = initial_project_summary(root)
-    write_json(path, summary)
-    return summary
+def append_jsonl(path: Path, item: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def read_records(records_path: Path) -> list[dict[str, Any]]:
@@ -697,6 +757,792 @@ def public_history_item(index: int, record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def empty_usage_totals() -> dict[str, int]:
+    return {key: 0 for key in USAGE_KEYS}
+
+
+def add_usage_totals(totals: dict[str, int], usage: dict[str, Any] | None) -> None:
+    normalized = normalize_usage(usage) or empty_usage_totals()
+    for key in USAGE_KEYS:
+        totals[key] += int(normalized.get(key) or 0)
+
+
+def project_task_metrics(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    token_totals = empty_usage_totals()
+    complexity_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    models: dict[str, int] = {}
+    elapsed_total = 0.0
+    git_closed_loops = 0
+
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+        task = item.get("task") if isinstance(item.get("task"), dict) else {}
+        timing = item.get("timing") if isinstance(item.get("timing"), dict) else {}
+        git = item.get("git") if isinstance(item.get("git"), dict) else {}
+        add_usage_totals(token_totals, item.get("token_usage") if isinstance(item.get("token_usage"), dict) else {})
+        elapsed_total += float(timing.get("elapsed_seconds") or 0.0)
+        complexity = normalize_complexity(task.get("complexity"))
+        category = normalize_project_task_category(task.get("category"))
+        status = normalize_project_task_status(task.get("status"))
+        complexity_counts[complexity] = complexity_counts.get(complexity, 0) + 1
+        category_counts[category] = category_counts.get(category, 0) + 1
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if git.get("git_closed_loop"):
+            git_closed_loops += 1
+        task_models = item.get("models") if isinstance(item.get("models"), dict) else {}
+        for model, count in task_models.items():
+            models[str(model)] = models.get(str(model), 0) + int(count or 0)
+
+    return {
+        "recorded_tasks": len(tasks),
+        "status_counts": status_counts,
+        "complexity_counts": complexity_counts,
+        "category_counts": category_counts,
+        "git_closed_loops": git_closed_loops,
+        "token_totals": token_totals,
+        "elapsed_seconds_total": round(elapsed_total, 3),
+        "turns_by_model": models,
+    }
+
+
+def empty_project_summary(root: Path) -> dict[str, Any]:
+    return {
+        "schema_version": PROJECT_SUMMARY_SCHEMA_VERSION,
+        "project": root.name,
+        "updated_at": None,
+        "metric_layers": {
+            "local_usage_files": "turn-level data is stored in ignored .agent/usage/summary.json and codex-turns.jsonl",
+            "task_history": "background-AI-curated project value tasks; no one-turn one-task mapping",
+        },
+        "task_metrics": project_task_metrics([]),
+        "task_history": [],
+        "privacy": {
+            "contains_user_prompts": False,
+            "contains_assistant_outputs": False,
+            "contains_session_ids": False,
+            "contains_transcript_paths": False,
+            "contains_derived_costs": False,
+            "contains_roi": False,
+            "contains_turn_level_task_history": False,
+            "task_history_is_ai_curated": True,
+            "task_history_maintainer": "background Codex exec agent, with manual override command",
+            "source_detail_file": ".agent/usage/codex-turns.jsonl",
+            "source_detail_file_committed": False,
+        },
+        "notes": [
+            "hook records turn-level token, timing, model, and git metadata into ignored local files",
+            "project task history is updated by a background AI maintainer using a normalized schema",
+            "consulting-only, git-only, and other no-deliverable turns can remain local-only without task entries",
+            "cost and ROI are regenerated into a separate value report from this summary and current policy",
+        ],
+    }
+
+
+def load_project_summary(root: Path, out_dir: Path) -> dict[str, Any]:
+    existing = load_json(out_dir / "project-summary.json")
+    if not isinstance(existing, dict) or existing.get("schema_version") != PROJECT_SUMMARY_SCHEMA_VERSION:
+        return empty_project_summary(root)
+    return existing
+
+
+def write_project_summary(
+    root: Path,
+    out_dir: Path,
+    project_summary: dict[str, Any],
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if summary is None:
+        summary = load_json(out_dir / "summary.json")
+    tasks = project_summary.get("task_history") if isinstance(project_summary.get("task_history"), list) else []
+    finalized = empty_project_summary(root)
+    finalized.update(
+        {
+            "updated_at": utc_now(),
+            "task_metrics": project_task_metrics([task for task in tasks if isinstance(task, dict)]),
+            "task_history": tasks,
+        }
+    )
+    write_json(out_dir / "project-summary.json", finalized)
+    return finalized
+
+
+def parse_project_task_update_args(argv: list[str]) -> tuple[dict[str, Any] | None, str | None]:
+    values: dict[str, Any] = {
+        "status": "completed",
+        "category": "implementation",
+        "complexity": "unknown",
+        "include_current_turn": True,
+        "apply_now": False,
+        "replace_turns": False,
+        "turn_indices": [],
+        "from_turn": None,
+        "to_turn": None,
+        "git_closed_loop": None,
+    }
+    value_options = {
+        "--task-id": "task_id",
+        "--title": "title",
+        "--summary": "summary",
+        "--status": "status",
+        "--category": "category",
+        "--complexity": "complexity",
+        "--reason": "complexity_reason",
+        "--business-value": "business_value",
+        "--turns": "turns",
+        "--from-turn": "from_turn",
+        "--to-turn": "to_turn",
+        "--git-closed-loop": "git_closed_loop_raw",
+    }
+
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--include-current-turn":
+            values["include_current_turn"] = True
+            index += 1
+            continue
+        if arg == "--no-current-turn":
+            values["include_current_turn"] = False
+            index += 1
+            continue
+        if arg == "--apply-now":
+            values["apply_now"] = True
+            index += 1
+            continue
+        if arg == "--replace-turns":
+            values["replace_turns"] = True
+            index += 1
+            continue
+        key = value_options.get(arg)
+        if key is None:
+            return None, f"unknown option: {arg}"
+        if index + 1 >= len(argv):
+            return None, f"missing value for {arg}"
+        values[key] = argv[index + 1]
+        index += 2
+
+    title = sanitize_public_task_text(values.get("title") or "")
+    if not title and not values.get("task_id"):
+        return None, "--title or --task-id is required"
+
+    for int_key in ("from_turn", "to_turn"):
+        if values.get(int_key) is None:
+            continue
+        try:
+            parsed = int(values[int_key])
+        except (TypeError, ValueError):
+            return None, f"{int_key.replace('_', '-')} must be an integer"
+        values[int_key] = parsed if parsed > 0 else None
+
+    git_closed_loop_raw = values.pop("git_closed_loop_raw", None)
+    values["git_closed_loop"] = parse_bool_flag(git_closed_loop_raw, default=None)
+    values["turn_indices"] = parse_turn_index_list(values.pop("turns", None))
+    values["task_id"] = stable_task_id(values.get("task_id"), title)
+    values["title"] = title or values["task_id"]
+    values["summary"] = sanitize_public_task_text(values.get("summary") or values["title"], 500)
+    values["status"] = normalize_project_task_status(values.get("status"))
+    values["category"] = normalize_project_task_category(values.get("category"))
+    values["complexity"] = normalize_complexity(values.get("complexity"))
+    values["complexity_reason"] = (
+        sanitize_public_task_text(values.get("complexity_reason"), 240)
+        if values.get("complexity_reason")
+        else "ai_assessment_missing"
+    )
+    values["business_value"] = (
+        sanitize_public_task_text(values.get("business_value"), 500)
+        if values.get("business_value")
+        else ""
+    )
+    return values, None
+
+
+def select_project_task_turns(
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    current_record_id: str | None = None,
+) -> list[tuple[int, dict[str, Any]]]:
+    selected_indices = set(int(index) for index in metadata.get("turn_indices") or [] if int(index) > 0)
+    from_turn = metadata.get("from_turn")
+    to_turn = metadata.get("to_turn")
+    if from_turn or to_turn:
+        start = int(from_turn or 1)
+        end = int(to_turn or len(records))
+        for index in range(max(1, start), min(len(records), end) + 1):
+            selected_indices.add(index)
+
+    if metadata.get("include_current_turn") and current_record_id:
+        for index, record in enumerate(records, 1):
+            if record.get("record_id") == current_record_id:
+                selected_indices.add(index)
+                break
+
+    return [
+        (index, record)
+        for index, record in enumerate(records, 1)
+        if index in selected_indices
+    ]
+
+
+def aggregate_project_task_turns(selected: list[tuple[int, dict[str, Any]]]) -> dict[str, Any]:
+    token_totals = empty_usage_totals()
+    elapsed_seconds = 0.0
+    models: dict[str, int] = {}
+    first_recorded_at = None
+    last_recorded_at = None
+    git_closed_loop = False
+    last_commit: dict[str, Any] | None = None
+
+    for _index, record in selected:
+        usage = ((record.get("token_usage") or {}).get("turn") or {})
+        add_usage_totals(token_totals, usage if isinstance(usage, dict) else {})
+        timing = record.get("timing") if isinstance(record.get("timing"), dict) else {}
+        elapsed_seconds += float(timing.get("elapsed_seconds") or 0.0)
+        model = str(record.get("model") or "unknown")
+        models[model] = models.get(model, 0) + 1
+        recorded_at = record.get("recorded_at")
+        first_recorded_at = first_recorded_at or recorded_at
+        last_recorded_at = recorded_at or last_recorded_at
+        git = record.get("git") if isinstance(record.get("git"), dict) else {}
+        if git.get("git_closed_loop"):
+            git_closed_loop = True
+        commit = git.get("last_commit") if isinstance(git.get("last_commit"), dict) else None
+        if commit and git.get("git_closed_loop"):
+            last_commit = commit
+
+    return {
+        "turn_indices": [index for index, _record in selected],
+        "turn_count": len(selected),
+        "first_recorded_at": first_recorded_at,
+        "last_recorded_at": last_recorded_at,
+        "token_usage": token_totals,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "models": models,
+        "git_closed_loop": git_closed_loop,
+        "last_commit": last_commit,
+    }
+
+
+def upsert_project_task(
+    project_summary: dict[str, Any],
+    metadata: dict[str, Any],
+    aggregate: dict[str, Any],
+) -> dict[str, Any]:
+    tasks = project_summary.get("task_history") if isinstance(project_summary.get("task_history"), list) else []
+    task_id = metadata["task_id"]
+    existing_index = next(
+        (index for index, item in enumerate(tasks) if isinstance(item, dict) and item.get("task_id") == task_id),
+        None,
+    )
+    existing = tasks[existing_index] if existing_index is not None else {}
+    existing_created_at = existing.get("created_at") if isinstance(existing, dict) else None
+    commit = aggregate.get("last_commit") if isinstance(aggregate.get("last_commit"), dict) else None
+    git_closed_loop = (
+        bool(metadata["git_closed_loop"])
+        if metadata.get("git_closed_loop") is not None
+        else bool(aggregate.get("git_closed_loop"))
+    )
+    git_closed_loop = bool(git_closed_loop and commit)
+    task_item = {
+        "task_id": task_id,
+        "created_at": existing_created_at or utc_now(),
+        "updated_at": utc_now(),
+        "source": "ai_agent_curated",
+        "task": {
+            "title": metadata["title"],
+            "summary": metadata["summary"],
+            "status": metadata["status"],
+            "category": metadata["category"],
+            "complexity": metadata["complexity"],
+            "complexity_reason": metadata["complexity_reason"],
+            "complexity_source": "ai_project_task_metadata",
+            "business_value": metadata["business_value"],
+        },
+        "turns": {
+            "turn_indices": aggregate["turn_indices"],
+            "turn_count": aggregate["turn_count"],
+            "first_recorded_at": aggregate["first_recorded_at"],
+            "last_recorded_at": aggregate["last_recorded_at"],
+        },
+        "models": aggregate["models"],
+        "timing": {
+            "elapsed_seconds": aggregate["elapsed_seconds"],
+        },
+        "token_usage": aggregate["token_usage"],
+        "git": {
+            "git_closed_loop": git_closed_loop,
+            "commit_sha": commit.get("sha") if commit and git_closed_loop else None,
+            "commit_subject": commit.get("subject") if commit and git_closed_loop else None,
+            "committed_at": commit.get("committed_at") if commit and git_closed_loop else None,
+        },
+    }
+    if existing_index is None:
+        tasks.append(task_item)
+    else:
+        tasks[existing_index] = task_item
+    project_summary["task_history"] = tasks
+    return project_summary
+
+
+def apply_project_task_update(
+    root: Path,
+    out_dir: Path,
+    metadata: dict[str, Any],
+    current_record_id: str | None = None,
+) -> dict[str, Any]:
+    records = read_records(out_dir / "codex-turns.jsonl")
+    summary = load_json(out_dir / "summary.json") or rebuild_summary(root, out_dir)
+    project_summary = load_project_summary(root, out_dir)
+    if not metadata.get("replace_turns"):
+        existing_tasks = project_summary.get("task_history") if isinstance(project_summary.get("task_history"), list) else []
+        existing = next(
+            (
+                item
+                for item in existing_tasks
+                if isinstance(item, dict) and item.get("task_id") == metadata.get("task_id")
+            ),
+            None,
+        )
+        existing_turns = ((existing or {}).get("turns") or {}).get("turn_indices") if isinstance(existing, dict) else []
+        if isinstance(existing_turns, list):
+            merged = set(int(index) for index in metadata.get("turn_indices") or [])
+            for index in existing_turns:
+                try:
+                    parsed = int(index)
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    merged.add(parsed)
+            metadata = dict(metadata)
+            metadata["turn_indices"] = sorted(merged)
+    selected = select_project_task_turns(records, metadata, current_record_id)
+    aggregate = aggregate_project_task_turns(selected)
+    project_summary = upsert_project_task(project_summary, metadata, aggregate)
+    return write_project_summary(root, out_dir, project_summary, summary)
+
+
+def record_project_task(root: Path, out_dir: Path, argv: list[str]) -> int:
+    metadata, error = parse_project_task_update_args(argv)
+    if error or metadata is None:
+        print(error or "invalid project task metadata", file=sys.stderr)
+        return 2
+
+    pending_path = newest_pending_path(out_dir)
+    if pending_path is not None and not metadata.get("apply_now"):
+        pending = load_json(pending_path) or {}
+        pending["project_task_update"] = metadata
+        write_json(pending_path, pending)
+        print(json.dumps({"ok": True, "mode": "queued_for_stop", "pending_path": str(pending_path)}, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    project_summary = apply_project_task_update(root, out_dir, metadata)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "mode": "applied",
+                "project_summary": str(out_dir / "project-summary.json"),
+                "recorded_tasks": project_summary.get("task_metrics", {}).get("recorded_tasks"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def maintainer_enabled() -> bool:
+    if parse_bool_flag(os.environ.get(MAINTAINER_ENV_FLAG), default=True) is False:
+        return False
+    if parse_bool_flag(os.environ.get(MAINTAINER_ACTIVE_ENV), default=False):
+        return False
+    return True
+
+
+def maintainer_dir(out_dir: Path) -> Path:
+    return out_dir / "project-summary-agent"
+
+
+def maintainer_log(out_dir: Path) -> Path:
+    return maintainer_dir(out_dir) / "jobs.jsonl"
+
+
+def log_maintainer_event(out_dir: Path, event: dict[str, Any]) -> None:
+    payload = {"timestamp": utc_now(), **event}
+    try:
+        append_jsonl(maintainer_log(out_dir), payload)
+    except OSError:
+        pass
+
+
+def maintainer_output_schema() -> dict[str, Any]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "decisions"],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 1},
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["action", "reason"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["skip_turn", "upsert_task"]},
+                        "reason": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "status": {"type": "string", "enum": sorted(PROJECT_TASK_STATUSES)},
+                        "category": {"type": "string", "enum": sorted(PROJECT_TASK_CATEGORIES)},
+                        "complexity": {"type": "string", "enum": sorted(COMPLEXITY_LEVELS)},
+                        "complexity_reason": {"type": "string"},
+                        "business_value": {"type": "string"},
+                        "turn_indices": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 1},
+                        },
+                        "git_closed_loop": {"type": ["boolean", "null"]},
+                        "replace_turns": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+    }
+
+
+def record_for_maintainer(index: int, record: dict[str, Any]) -> dict[str, Any]:
+    task = record.get("task") if isinstance(record.get("task"), dict) else {}
+    timing = record.get("timing") if isinstance(record.get("timing"), dict) else {}
+    git = record.get("git") if isinstance(record.get("git"), dict) else {}
+    last_commit = git.get("last_commit") if isinstance(git.get("last_commit"), dict) else None
+    return {
+        "turn_index": index,
+        "recorded_at": record.get("recorded_at"),
+        "model": record.get("model") or "unknown",
+        "user_prompt_summary": sanitize_public_task_text(((record.get("user_input") or {}).get("text")), 500),
+        "assistant_result_summary": sanitize_public_task_text(((record.get("assistant_output") or {}).get("text")), 500),
+        "turn_task_hint": {
+            "description": task.get("description"),
+            "description_source": task.get("description_source"),
+            "complexity": task.get("complexity"),
+            "complexity_reason": task.get("complexity_reason"),
+        },
+        "timing": {
+            "elapsed_seconds": timing.get("elapsed_seconds"),
+        },
+        "token_usage": normalize_usage(((record.get("token_usage") or {}).get("turn") or {}))
+        or empty_usage_totals(),
+        "git": {
+            "clean": bool(git.get("clean")),
+            "head_changed": bool(git.get("head_changed")),
+            "git_closed_loop": bool(git.get("git_closed_loop")),
+            "status_delta_count": int(git.get("status_delta_count") or 0),
+            "status_delta_sample": [str(line) for line in git.get("status_delta_sample") or []][:20],
+            "last_commit": (
+                {
+                    "sha": last_commit.get("sha"),
+                    "committed_at": last_commit.get("committed_at"),
+                    "subject": last_commit.get("subject"),
+                    "author_name": last_commit.get("author_name"),
+                    "author_email": last_commit.get("author_email"),
+                }
+                if last_commit
+                else None
+            ),
+        },
+    }
+
+
+def project_summary_for_maintainer(project_summary: dict[str, Any]) -> dict[str, Any]:
+    tasks = project_summary.get("task_history") if isinstance(project_summary.get("task_history"), list) else []
+    return {
+        "schema_version": project_summary.get("schema_version"),
+        "task_metrics": project_summary.get("task_metrics"),
+        "task_history": tasks,
+    }
+
+
+def build_maintainer_prompt(root: Path, out_dir: Path, record_id: str | None) -> tuple[str, int | None]:
+    records = read_records(out_dir / "codex-turns.jsonl")
+    current_index = None
+    if record_id:
+        for index, record in enumerate(records, 1):
+            if record.get("record_id") == record_id:
+                current_index = index
+                break
+    if current_index is None and records:
+        current_index = len(records)
+
+    recent_start = max(1, (current_index or len(records) or 1) - 8)
+    recent_records = [
+        record_for_maintainer(index, record)
+        for index, record in enumerate(records, 1)
+        if index >= recent_start
+    ]
+    current_record = (
+        record_for_maintainer(current_index, records[current_index - 1])
+        if current_index and 0 < current_index <= len(records)
+        else None
+    )
+    project_summary = load_project_summary(root, out_dir)
+    context = {
+        "project": root.name,
+        "current_turn_index": current_index,
+        "current_record": current_record,
+        "recent_turn_records": recent_records,
+        "project_summary": project_summary_for_maintainer(project_summary),
+        "current_git_status": {
+            "head": run_text(["git", "rev-parse", "--short", "HEAD"], root),
+            "status_lines": git_status_lines(root)[:40],
+        },
+    }
+    prompt = f"""You are a background AI maintainer for `.agent/usage/project-summary.json`.
+
+Your job is to decide whether the latest Codex turn should update the AI-curated task history.
+Do not edit files. Do not run shell commands. Return only JSON matching the supplied schema.
+
+Rules:
+- Turn-level metrics are stored in ignored local files; you only decide `task_history` updates.
+- Do not create a task for consultation-only, status-only, environment inspection, pure git commit, pure push, or any turn with no actual deliverable.
+- Do not create a task named like "commit git" or "push". If a git-only turn closes earlier work, update the existing task and set `git_closed_loop=true`.
+- If the latest turn is part of an existing task, return `upsert_task` with that same `task_id` and all turn indices that belong to the task. Reuse existing task wording when it is still accurate.
+- If a task spans multiple user turns, merge them into one task. Never create duplicate tasks for the same work.
+- If the latest turn is already represented in `project_summary.task_history`, return `skip_turn`.
+- Use stable fields only. Do not include raw prompts, assistant output, session ids, transcript paths, local absolute paths, costs, or ROI.
+- Allowed categories: {", ".join(sorted(PROJECT_TASK_CATEGORIES))}.
+- Allowed complexity values: low, medium, high, unknown.
+
+Context:
+```json
+{json.dumps(context, ensure_ascii=False, indent=2, sort_keys=True)}
+```
+"""
+    return prompt, current_index
+
+
+def decision_turn_indices(decision: dict[str, Any], current_turn_index: int | None) -> list[int]:
+    raw = decision.get("turn_indices")
+    indices: list[int] = []
+    if isinstance(raw, list):
+        for value in raw:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0 and parsed not in indices:
+                indices.append(parsed)
+    if not indices and current_turn_index:
+        indices.append(current_turn_index)
+    return indices
+
+
+def apply_maintainer_decisions(
+    root: Path,
+    out_dir: Path,
+    result: dict[str, Any],
+    current_turn_index: int | None,
+) -> dict[str, int]:
+    counts = {"upserted": 0, "skipped": 0, "invalid": 0}
+    decisions = result.get("decisions") if isinstance(result.get("decisions"), list) else []
+    records = read_records(out_dir / "codex-turns.jsonl")
+    current_record = (
+        records[current_turn_index - 1]
+        if current_turn_index and 0 < current_turn_index <= len(records)
+        else {}
+    )
+    current_git = current_record.get("git") if isinstance(current_record.get("git"), dict) else {}
+    if not decisions:
+        counts["skipped"] += 1
+        return counts
+
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            counts["invalid"] += 1
+            continue
+        action = str(decision.get("action") or "")
+        if action == "skip_turn":
+            counts["skipped"] += 1
+            continue
+        if action != "upsert_task":
+            counts["invalid"] += 1
+            continue
+        title = sanitize_public_task_text(decision.get("title") or decision.get("task_id") or "", 160)
+        task_id = stable_task_id(str(decision.get("task_id") or ""), title)
+        metadata = {
+            "task_id": task_id,
+            "title": title or task_id,
+            "summary": sanitize_public_task_text(decision.get("summary") or title or task_id, 500),
+            "status": normalize_project_task_status(decision.get("status")),
+            "category": normalize_project_task_category(decision.get("category")),
+            "complexity": normalize_complexity(decision.get("complexity")),
+            "complexity_reason": sanitize_public_task_text(
+                decision.get("complexity_reason") or decision.get("reason") or "ai_assessment_missing",
+                240,
+            ),
+            "business_value": sanitize_public_task_text(decision.get("business_value") or "", 500),
+            "turn_indices": decision_turn_indices(decision, current_turn_index),
+            "include_current_turn": False,
+            "replace_turns": bool(decision.get("replace_turns")),
+            "git_closed_loop": parse_bool_flag(decision.get("git_closed_loop"), default=None),
+            "apply_now": True,
+            "from_turn": None,
+            "to_turn": None,
+        }
+        if metadata["git_closed_loop"] is True and current_turn_index and current_git.get("git_closed_loop"):
+            if current_turn_index not in metadata["turn_indices"]:
+                metadata["turn_indices"].append(current_turn_index)
+                metadata["turn_indices"] = sorted(set(metadata["turn_indices"]))
+        apply_project_task_update(root, out_dir, metadata)
+        counts["upserted"] += 1
+
+    return counts
+
+
+def run_project_summary_agent(root: Path, out_dir: Path, record_id: str | None = None) -> int:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    agent_dir = maintainer_dir(out_dir)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = agent_dir / ".lock"
+    lock_handle = lock_path.open("a+", encoding="utf-8")
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log_maintainer_event(out_dir, {"event": "skip_locked", "record_id": record_id})
+            lock_handle.close()
+            return 0
+
+    job_id = f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{safe_name(record_id)}"
+    try:
+        codex_bin = shutil.which("codex")
+        if not codex_bin:
+            log_maintainer_event(out_dir, {"event": "missing_codex", "record_id": record_id})
+            return 0
+
+        prompt, current_turn_index = build_maintainer_prompt(root, out_dir, record_id)
+        schema_path = agent_dir / "project-summary-agent.schema.json"
+        prompt_path = agent_dir / f"{job_id}.prompt.md"
+        output_path = agent_dir / f"{job_id}.output.json"
+        stderr_path = agent_dir / f"{job_id}.stderr.log"
+        write_json(schema_path, maintainer_output_schema())
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+        env = os.environ.copy()
+        env[MAINTAINER_ACTIVE_ENV] = "1"
+        env[MAINTAINER_ENV_FLAG] = "0"
+        env["AGENT_USAGE_DIR"] = str(out_dir)
+        model = os.environ.get(MAINTAINER_MODEL_ENV, DEFAULT_MAINTAINER_MODEL)
+        cmd = [
+            codex_bin,
+            "exec",
+            "--ignore-rules",
+            "--disable",
+            "codex_hooks",
+            "--sandbox",
+            "read-only",
+            "-c",
+            'approval_policy="never"',
+            "-C",
+            str(root),
+            "-m",
+            model,
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+            "-",
+        ]
+        log_maintainer_event(out_dir, {"event": "start", "record_id": record_id, "job_id": job_id, "model": model})
+        with stderr_path.open("w", encoding="utf-8") as stderr_handle:
+            result = subprocess.run(
+                cmd,
+                cwd=str(root),
+                env=env,
+                input=prompt,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_handle,
+                timeout=int(env_float("AGENT_USAGE_MAINTAINER_TIMEOUT", 600.0, minimum=30.0)),
+                check=False,
+            )
+        if result.returncode != 0:
+            log_maintainer_event(
+                out_dir,
+                {"event": "codex_failed", "record_id": record_id, "job_id": job_id, "returncode": result.returncode},
+            )
+            return 0
+
+        output = load_json(output_path)
+        if not isinstance(output, dict):
+            log_maintainer_event(out_dir, {"event": "invalid_output", "record_id": record_id, "job_id": job_id})
+            return 0
+        counts = apply_maintainer_decisions(root, out_dir, output, current_turn_index)
+        log_maintainer_event(
+            out_dir,
+            {"event": "applied", "record_id": record_id, "job_id": job_id, "counts": counts},
+        )
+        return 0
+    except subprocess.TimeoutExpired:
+        log_maintainer_event(out_dir, {"event": "timeout", "record_id": record_id, "job_id": job_id})
+        return 0
+    except Exception as exc:
+        log_maintainer_event(
+            out_dir,
+            {"event": "error", "record_id": record_id, "job_id": job_id, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        return 0
+    finally:
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()
+
+
+def maybe_start_project_summary_agent(root: Path, out_dir: Path, record_id: str) -> None:
+    if not maintainer_enabled():
+        log_maintainer_event(out_dir, {"event": "disabled", "record_id": record_id})
+        return
+    if parse_bool_flag(os.environ.get(MAINTAINER_SYNC_ENV), default=False):
+        run_project_summary_agent(root, out_dir, record_id)
+        return
+
+    script_path = Path(__file__).resolve()
+    env = os.environ.copy()
+    env[MAINTAINER_ACTIVE_ENV] = "1"
+    env["AGENT_USAGE_DIR"] = str(out_dir)
+    command = [
+        sys.executable,
+        str(script_path),
+        "--run-project-summary-agent",
+        "--record-id",
+        record_id,
+    ]
+    try:
+        agent_dir = maintainer_dir(out_dir)
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        with (agent_dir / "process.log").open("ab") as process_log:
+            subprocess.Popen(
+                command,
+                cwd=str(root),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=process_log,
+                stderr=process_log,
+                start_new_session=True,
+                close_fds=True,
+            )
+        log_maintainer_event(out_dir, {"event": "spawned", "record_id": record_id})
+    except Exception as exc:
+        log_maintainer_event(
+            out_dir,
+            {"event": "spawn_failed", "record_id": record_id, "error": f"{type(exc).__name__}: {exc}"},
+        )
+
+
 def empty_cost_totals() -> dict[str, Any]:
     return {
         "currency": "CNY",
@@ -704,6 +1550,10 @@ def empty_cost_totals() -> dict[str, Any]:
         "unpriced_turns": 0,
         "ai_cost_usd": 0.0,
         "ai_cost_cny": 0.0,
+        "input_cost_cny": 0.0,
+        "uncached_input_cost_cny": 0.0,
+        "cached_input_cost_cny": 0.0,
+        "output_cost_cny": 0.0,
         "traditional_cost_cny_all": 0.0,
         "traditional_cost_cny_priced": 0.0,
         "replacement_savings_cny": 0.0,
@@ -729,6 +1579,10 @@ def add_cost_totals(
     totals["priced_turns"] += 1
     totals["ai_cost_usd"] += float(economics.get("ai_cost_usd") or 0.0)
     totals["ai_cost_cny"] += float(ai_cost_cny)
+    totals["input_cost_cny"] += float(economics.get("input_cost_cny") or 0.0)
+    totals["uncached_input_cost_cny"] += float(economics.get("uncached_input_cost_cny") or 0.0)
+    totals["cached_input_cost_cny"] += float(economics.get("cached_input_cost_cny") or 0.0)
+    totals["output_cost_cny"] += float(economics.get("output_cost_cny") or 0.0)
     totals["traditional_cost_cny_priced"] += traditional
     totals["replacement_savings_cny"] += float(economics.get("replacement_savings_cny") or 0.0)
 
@@ -738,12 +1592,20 @@ def add_cost_totals(
             "currency": "CNY",
             "turns": 0,
             "ai_cost_cny": 0.0,
+            "input_cost_cny": 0.0,
+            "uncached_input_cost_cny": 0.0,
+            "cached_input_cost_cny": 0.0,
+            "output_cost_cny": 0.0,
             "traditional_cost_cny": 0.0,
             "replacement_savings_cny": 0.0,
         },
     )
     model_entry["turns"] += 1
     model_entry["ai_cost_cny"] += float(ai_cost_cny)
+    model_entry["input_cost_cny"] += float(economics.get("input_cost_cny") or 0.0)
+    model_entry["uncached_input_cost_cny"] += float(economics.get("uncached_input_cost_cny") or 0.0)
+    model_entry["cached_input_cost_cny"] += float(economics.get("cached_input_cost_cny") or 0.0)
+    model_entry["output_cost_cny"] += float(economics.get("output_cost_cny") or 0.0)
     model_entry["traditional_cost_cny"] += traditional
     model_entry["replacement_savings_cny"] += float(economics.get("replacement_savings_cny") or 0.0)
 
@@ -756,6 +1618,10 @@ def finalize_cost_totals(totals: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "ai_cost_usd",
         "ai_cost_cny",
+        "input_cost_cny",
+        "uncached_input_cost_cny",
+        "cached_input_cost_cny",
+        "output_cost_cny",
         "traditional_cost_cny_all",
         "traditional_cost_cny_priced",
         "replacement_savings_cny",
@@ -776,6 +1642,10 @@ def finalize_cost_by_model(cost_by_model: dict[str, dict[str, Any]]) -> dict[str
             "currency": "CNY",
             "turns": values.get("turns", 0),
             "ai_cost_cny": round_money(ai_cost, 4),
+            "input_cost_cny": round_money(float(values.get("input_cost_cny") or 0.0), 4),
+            "uncached_input_cost_cny": round_money(float(values.get("uncached_input_cost_cny") or 0.0), 4),
+            "cached_input_cost_cny": round_money(float(values.get("cached_input_cost_cny") or 0.0), 4),
+            "output_cost_cny": round_money(float(values.get("output_cost_cny") or 0.0), 4),
             "traditional_cost_cny": round_money(float(values.get("traditional_cost_cny") or 0.0), 2),
             "replacement_savings_cny": round_money(savings, 4),
             "roi_ratio": round_money(roi_ratio, 4),
@@ -784,60 +1654,23 @@ def finalize_cost_by_model(cost_by_model: dict[str, dict[str, Any]]) -> dict[str
     return finalized
 
 
-def project_summary_value_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    tasks = summary.get("tasks")
-    if isinstance(tasks, list):
-        items: list[dict[str, Any]] = []
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            if task.get("value_included") is False:
-                continue
-            status = str(task.get("status") or "").strip().lower()
-            if status in {"excluded", "no_delivery", "no-delivery", "bookkeeping_only", "consultation_only"}:
-                continue
-            business_value = task.get("business_value") if isinstance(task.get("business_value"), dict) else {}
-            token_usage = normalize_usage(task.get("token_usage") if isinstance(task.get("token_usage"), dict) else {})
-            models = task.get("models") if isinstance(task.get("models"), list) else []
-            primary_model = str(task.get("primary_model") or (models[0] if models else "") or "unknown")
-            items.append(
-                {
-                    "task_id": task.get("task_id"),
-                    "title": task.get("title") or business_value.get("description") or task.get("summary"),
-                    "summary": task.get("summary"),
-                    "model": primary_model,
-                    "task": {
-                        "description": business_value.get("description") or task.get("summary") or task.get("title") or "未提供 AI 任务摘要",
-                        "complexity": normalize_complexity(business_value.get("complexity")),
-                        "complexity_reason": business_value.get("complexity_reason"),
-                        "complexity_source": business_value.get("complexity_source") or "project_summary_maintainer",
-                    },
-                    "timing": {
-                        "elapsed_seconds": task.get("elapsed_seconds"),
-                    },
-                    "token_usage": token_usage or {key: 0 for key in USAGE_KEYS},
-                    "git": task.get("git") if isinstance(task.get("git"), dict) else {},
-                    "included_turn_indexes": task.get("included_turn_indexes") if isinstance(task.get("included_turn_indexes"), list) else [],
-                }
-            )
-        return items
-
-    task_history = summary.get("task_history") if isinstance(summary.get("task_history"), list) else []
-    return [item for item in task_history if isinstance(item, dict)]
-
-
 def build_value_report(root: Path, out_dir: Path, project_summary: dict[str, Any] | None = None) -> dict[str, Any]:
-    summary = project_summary or load_json(out_dir / "project-summary.json") or ensure_project_summary(root, out_dir)
-    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+    summary = project_summary
+    if summary is None:
+        loaded = load_json(out_dir / "project-summary.json")
+        summary = loaded if isinstance(loaded, dict) and loaded.get("schema_version") == PROJECT_SUMMARY_SCHEMA_VERSION else refresh_project_summary(root, out_dir)
     cost_totals = empty_cost_totals()
     cost_by_model: dict[str, dict[str, Any]] = {}
     task_value_history: list[dict[str, Any]] = []
+    task_metrics = summary.get("task_metrics") if isinstance(summary.get("task_metrics"), dict) else {}
 
-    for item in project_summary_value_items(summary):
+    task_history = summary.get("task_history") if isinstance(summary.get("task_history"), list) else []
+    for item in task_history:
         if not isinstance(item, dict):
             continue
         task = item.get("task") if isinstance(item.get("task"), dict) else {}
-        model = str(item.get("model") or "unknown")
+        item_models = item.get("models") if isinstance(item.get("models"), dict) else {}
+        model = str(item.get("model") or (next(iter(item_models.keys())) if len(item_models) == 1 else "multiple"))
         usage = normalize_usage(item.get("token_usage") if isinstance(item.get("token_usage"), dict) else {})
         economics = estimate_turn_economics(
             model,
@@ -846,38 +1679,44 @@ def build_value_report(root: Path, out_dir: Path, project_summary: dict[str, Any
             task.get("complexity_reason"),
         )
         add_cost_totals(cost_totals, cost_by_model, model, economics)
-        history_item = {
-            "model": model,
-            "task": task,
-            "timing": item.get("timing"),
-            "token_usage": usage or {key: 0 for key in USAGE_KEYS},
-            "git": item.get("git"),
-            "cost_estimate": {
-                "currency": "CNY",
-                "pricing_available": economics.get("pricing_available"),
-                "model_price_key": economics.get("model_price_key"),
-                "ai_cost_cny": economics.get("ai_cost_cny"),
-                "traditional_hours": economics.get("traditional_hours"),
-                "traditional_cost_cny": economics.get("traditional_cost_cny"),
-                "replacement_savings_cny": economics.get("replacement_savings_cny"),
-                "roi_ratio": economics.get("roi_ratio"),
-                "roi_percent": economics.get("roi_percent"),
-            },
-        }
-        for key in ("task_id", "title", "summary", "turn_index", "recorded_at", "included_turn_indexes"):
-            if key in item:
-                history_item[key] = item.get(key)
-        task_value_history.append(history_item)
+        task_value_history.append(
+            {
+                "task_id": item.get("task_id"),
+                "turn_index": item.get("turn_index"),
+                "recorded_at": item.get("recorded_at") or item.get("updated_at"),
+                "model": model,
+                "task": task,
+                "timing": item.get("timing"),
+                "token_usage": usage or {key: 0 for key in USAGE_KEYS},
+                "git": item.get("git"),
+                "cost_estimate": {
+                    "currency": "CNY",
+                    "pricing_available": economics.get("pricing_available"),
+                    "model_price_key": economics.get("model_price_key"),
+                    "input_usd_per_1m": economics.get("input_usd_per_1m"),
+                    "cached_input_usd_per_1m": economics.get("cached_input_usd_per_1m"),
+                    "output_usd_per_1m": economics.get("output_usd_per_1m"),
+                    "ai_cost_cny": economics.get("ai_cost_cny"),
+                    "input_cost_cny": economics.get("input_cost_cny"),
+                    "uncached_input_cost_cny": economics.get("uncached_input_cost_cny"),
+                    "cached_input_cost_cny": economics.get("cached_input_cost_cny"),
+                    "output_cost_cny": economics.get("output_cost_cny"),
+                    "traditional_hours": economics.get("traditional_hours"),
+                    "traditional_cost_cny": economics.get("traditional_cost_cny"),
+                    "replacement_savings_cny": economics.get("replacement_savings_cny"),
+                    "roi_ratio": economics.get("roi_ratio"),
+                    "roi_percent": economics.get("roi_percent"),
+                },
+            }
+        )
 
     return {
         "schema_version": 1,
         "project": summary.get("project") or root.name,
         "generated_at": utc_now(),
-        "source_summary_schema_version": summary.get("schema_version"),
         "source_summary_file": ".agent/usage/project-summary.json",
         "source_summary_updated_at": summary.get("updated_at"),
-        "recorded_turns": summary.get("recorded_turns") or totals.get("audit_recorded_turns", 0),
-        "value_task_count": len(task_value_history),
+        "recorded_tasks": task_metrics.get("recorded_tasks", len(task_history)),
         "cost_policy": cost_policy(),
         "cost_totals": finalize_cost_totals(cost_totals),
         "cost_by_model": finalize_cost_by_model(cost_by_model),
@@ -983,64 +1822,82 @@ def rebuild_summary(root: Path, out_dir: Path) -> dict[str, Any]:
         "notes": [
             "turn token totals use Codex transcript cumulative deltas when available",
             "user prompt and assistant output token estimates are local text estimates",
-            "summary.json is local hook-layer audit data and should not be committed",
-            "project-summary.json is maintained separately by the background Codex maintainer",
-            "derived value reports are regenerated from project-summary.json and current policy",
+            "project summary stores stable usage metadata only; derived value reports are regenerated separately",
+            "usage records are project-local runtime data and should not be committed",
         ],
     }
     write_json(out_dir / "summary.json", summary)
-    ensure_project_summary(root, out_dir)
     return summary
 
 
-def append_turn_record(root: Path, out_dir: Path, record: dict[str, Any]) -> bool:
+def refresh_project_summary(root: Path, out_dir: Path) -> dict[str, Any]:
+    summary = rebuild_summary(root, out_dir)
+    project_summary = load_project_summary(root, out_dir)
+    return write_project_summary(root, out_dir, project_summary, summary)
+
+
+def finalize_latest_project_task_from_git(root: Path, out_dir: Path) -> dict[str, Any]:
+    commit = latest_git_commit(root)
+    if not commit:
+        return {"changed": False, "reason": "missing_git_commit"}
+
+    project_summary = load_project_summary(root, out_dir)
+    tasks = project_summary.get("task_history") if isinstance(project_summary.get("task_history"), list) else []
+    candidates: list[tuple[dt.datetime, int, dict[str, Any]]] = []
+    for index, item in enumerate(tasks):
+        if not isinstance(item, dict):
+            continue
+        git = item.get("git") if isinstance(item.get("git"), dict) else {}
+        if git.get("commit_sha"):
+            continue
+        task = item.get("task") if isinstance(item.get("task"), dict) else {}
+        turns = item.get("turns") if isinstance(item.get("turns"), dict) else {}
+        sort_time = (
+            parse_time(str(turns.get("last_recorded_at") or ""))
+            or parse_time(str(item.get("updated_at") or ""))
+            or parse_time(str(item.get("created_at") or ""))
+            or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        )
+        status_bonus = 1 if normalize_project_task_status(task.get("status")) == "in_progress" else 0
+        candidates.append((sort_time + dt.timedelta(microseconds=status_bonus), index, item))
+
+    if not candidates:
+        return {"changed": False, "reason": "no_unclosed_task"}
+
+    _sort_time, index, item = max(candidates, key=lambda entry: (entry[0], entry[1]))
+    task = dict(item.get("task") if isinstance(item.get("task"), dict) else {})
+    task["status"] = "completed"
+    updated = dict(item)
+    updated["task"] = task
+    updated["updated_at"] = utc_now()
+    updated["git"] = {
+        "git_closed_loop": True,
+        "commit_sha": commit.get("sha"),
+        "commit_subject": commit.get("subject"),
+        "committed_at": commit.get("committed_at"),
+    }
+    tasks[index] = updated
+    project_summary["task_history"] = tasks
+    finalized = write_project_summary(root, out_dir, project_summary)
+    return {
+        "changed": True,
+        "task_id": updated.get("task_id"),
+        "commit_sha": commit.get("sha"),
+        "recorded_tasks": finalized.get("task_metrics", {}).get("recorded_tasks"),
+    }
+
+
+def append_turn_record(root: Path, out_dir: Path, record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     records_path = out_dir / "codex-turns.jsonl"
     lock_path = out_dir / ".lock"
-    appended = False
     with UsageLock(lock_path):
         existing_ids = {item.get("record_id") for item in read_records(records_path)}
+        appended = False
         if record.get("record_id") not in existing_ids:
             with records_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
             appended = True
-        rebuild_summary(root, out_dir)
-    return appended
-
-
-def start_project_summary_maintainer(root: Path, out_dir: Path) -> None:
-    disabled = str(os.environ.get(MAINTAINER_DISABLED_ENV) or "").strip().lower()
-    if disabled in {"1", "true", "yes", "on"}:
-        return
-
-    script = root / ".agent" / "scripts" / "project-summary-maintainer.sh"
-    if not script.exists():
-        log_error(out_dir, f"project summary maintainer script missing: {script}")
-        return
-
-    env = os.environ.copy()
-    env[HOOK_DISABLED_ENV] = "1"
-    env["AGENT_PROJECT_SUMMARY_MAINTAINER"] = "1"
-    env.setdefault("AGENT_USAGE_DIR", str(out_dir))
-
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        log_path = out_dir / "project-summary-maintainer.log"
-        log_handle = log_path.open("ab")
-        try:
-            subprocess.Popen(
-                [str(script)],
-                cwd=str(root),
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-                close_fds=True,
-            )
-        finally:
-            log_handle.close()
-    except OSError as exc:
-        log_error(out_dir, f"project summary maintainer launch failed: {type(exc).__name__}: {exc}")
+        return rebuild_summary(root, out_dir), appended
 
 
 def record_prompt(event: dict[str, Any], root: Path, out_dir: Path) -> None:
@@ -1161,13 +2018,21 @@ def record_stop(event: dict[str, Any], root: Path, out_dir: Path) -> None:
             "pending_path": str(pending_path),
         },
     }
-    appended = append_turn_record(root, out_dir, record)
+    summary, appended = append_turn_record(root, out_dir, record)
+    if not appended:
+        try:
+            pending_path.unlink()
+        except OSError:
+            pass
+        return
+    project_task_update = pending.get("project_task_update")
+    if isinstance(project_task_update, dict):
+        apply_project_task_update(root, out_dir, project_task_update, current_record_id=record["record_id"])
+    maybe_start_project_summary_agent(root, out_dir, record["record_id"])
     try:
         pending_path.unlink()
     except OSError:
         pass
-    if appended:
-        start_project_summary_maintainer(root, out_dir)
 
 
 def log_error(out_dir: Path, message: str) -> None:
@@ -1188,11 +2053,14 @@ def main() -> int:
         root = resolve_repo_root(os.getcwd())
         rebuild_summary(root, usage_dir(root))
         return 0
-    if len(sys.argv) > 1 and sys.argv[1] == "--ensure-project-summary":
+    if len(sys.argv) > 1 and sys.argv[1] == "--refresh-project-summary":
         root = resolve_repo_root(os.getcwd())
-        out_dir = usage_dir(root)
-        ensure_project_summary(root, out_dir)
-        print(str(out_dir / "project-summary.json"))
+        refresh_project_summary(root, usage_dir(root))
+        return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--finalize-latest-project-task-from-git":
+        root = resolve_repo_root(os.getcwd())
+        result = finalize_latest_project_task_from_git(root, usage_dir(root))
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--write-value-report":
         root = resolve_repo_root(os.getcwd())
@@ -1213,10 +2081,16 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--set-current-turn-metadata":
         root = resolve_repo_root(os.getcwd())
         return set_current_turn_metadata(root, usage_dir(root), sys.argv[2:])
-
-    if str(os.environ.get(HOOK_DISABLED_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}:
-        hook_success()
-        return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--record-project-task":
+        root = resolve_repo_root(os.getcwd())
+        return record_project_task(root, usage_dir(root), sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "--run-project-summary-agent":
+        root = resolve_repo_root(os.getcwd())
+        record_id = None
+        for index, arg in enumerate(sys.argv[2:]):
+            if arg == "--record-id" and index + 3 < len(sys.argv):
+                record_id = sys.argv[index + 3]
+        return run_project_summary_agent(root, usage_dir(root), record_id)
 
     raw = sys.stdin.read()
     try:
